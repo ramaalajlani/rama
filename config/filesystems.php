@@ -38,6 +38,14 @@ return [
             'report' => false,
         ],
 
+        // تم إضافة هذا الجزء لحل مشكلة الخطأ في الـ Service
+        'private' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private'),
+            'visibility' => 'private',
+            'throw' => false,
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),

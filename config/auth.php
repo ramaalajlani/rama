@@ -35,13 +35,18 @@ return [
     |
     */
 
-    'guards' => [
-        'web' => [
-            'driver' => 'session',
-            'provider' => 'users',
-        ],
+'guards' => [
+    'web' => [
+        'driver' => 'session',
+        'provider' => 'users',
     ],
 
+    // أضف هذا الجزء لضمان التعرف على توكن Sanctum والجلسة
+    'api' => [
+        'driver' => 'sanctum',
+        'provider' => 'users',
+    ],
+],
     /*
     |--------------------------------------------------------------------------
     | User Providers

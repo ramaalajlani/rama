@@ -17,6 +17,14 @@ return new class extends Migration
             $table->string('email')->unique();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
+
+            // --- التعديلات المطلوبة هنا ---
+            // أضفنا رابط الفرع (يجب أن يكون قابلاً للحذف null إذا حذف الفرع)
+            $table->foreignId('branch_id')->nullable()->constrained('branches')->onDelete('set null');
+            // أضفنا حالة المستخدم (نشط أو غير نشط)
+            $table->string('status')->default('active');
+            // ----------------------------
+
             $table->rememberToken();
             $table->timestamps();
         });
