@@ -25,36 +25,25 @@ class GuestController extends Controller
     /**
      * عرض النزلاء مع العزل الأمني بين الفروع
      */
-    public function index(Request $request): JsonResponse
-    {
-        try {
-            $this->authorize('viewAny', Guest::class);
-            $user = $request->user();
+   // في GuestController.php
+public function index(Request $request): JsonResponse
+{
+    $user = $request->user();
+    $query = Guest::query();
 
-            $query = Guest::query();
-
-            // 1. عزل البيانات بناءً على الصلاحيات
-            if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor'])) {
-                $query->whereHas('reservations', function ($q) use ($user) {
-                    $q->where('guest_reservations.branch_id', $user->branch_id);
-                });
-            }
-
-            // 2. التحميل الذكي (Eager Loading) المحدود لمنع ثقل البيانات
-            $guests = $query->with(['latestReservation' => function($q) {
-                // نختار حقولاً محددة فقط لكسر أي دوران JSON
-                $q->select('guest_reservations.id', 'room_id', 'branch_id', 'check_in', 'status');
-            }])->latest()->paginate(15);
-            
-            return response()->json([
-                'status' => 'success',
-                'data'   => $guests
-            ]);
-        } catch (Exception $e) {
-            Log::error("Guest Index Error: " . $e->getMessage());
-            return response()->json(['status' => 'error', 'message' => 'تعذر تحميل قائمة النزلاء.'], 500);
-        }
+    // إذا كان موظف فرع، يرى فقط النزلاء الذين زاروا فرعه
+    if (!$user->hasRole('hq_admin')) {
+        $query->whereHas('reservations', function ($q) use ($user) {
+            $q->where('branch_id', $user->branch_id);
+        });
     }
+
+    $guests = $query->with(['reservations' => function($q) {
+        $q->latest()->limit(1); // عرض آخر حجز فقط لكل نزيل
+    }])->paginate(15);
+
+    return response()->json(['status' => 'success', 'data' => $guests]);
+}
 
     /**
      * البحث الذكي مع فحص أمني صامت (Silent Security Match)

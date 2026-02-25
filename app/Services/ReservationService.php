@@ -17,6 +17,29 @@ class ReservationService
     }
 
     /**
+     * حساب إحصائيات اليوم - (تمت إضافتها لتتوافق مع طلبك السابق)
+     */
+    public function getDailyStats($branchId = null)
+    {
+        $branchId = $branchId ?? Auth::user()->branch_id;
+        $today = Carbon::today();
+
+        return [
+            'check_ins_today' => Reservation::where('branch_id', $branchId)
+                ->whereDate('check_in', $today)
+                ->count(),
+
+            'check_outs_today' => Reservation::where('branch_id', $branchId)
+                ->whereDate('actual_check_out', $today)
+                ->count(),
+
+            'currently_in_house' => Reservation::where('branch_id', $branchId)
+                ->currentlyIn() 
+                ->count(),
+        ];
+    }
+
+    /**
      * إنشاء حجز جديد (البند 3: الحالة الافتراضية "جديد")
      */
     public function storeReservation(array $data)
@@ -36,15 +59,15 @@ class ReservationService
                 throw new \Exception("عذراً، الغرفة رقم ({$room->room_number}) محجوزة حالياً.");
             }
 
-            // 2. إنشاء الحجز مع ضبط حالة التدقيق كـ "جديد"
+            // 2. إنشاء الحجز مع ضبط حالة التدقيق كـ "جديد" والحالة 'confirmed' لظهور الإحصائيات
             $reservation = Reservation::create([
                 'room_id'        => $data['room_id'],
                 'branch_id'      => $data['branch_id'] ?? $user->branch_id, 
                 'user_id'        => $user->id,   
-                'check_in'       => $data['check_in'],
+                'check_in'       => $data['check_in'] ?? now(),
                 'check_out'      => $data['check_out'],
                 'status'         => $data['status'] ?? 'confirmed',
-                'audit_status'   => 'new', // متطلب وثيقة الاعتماد
+                'audit_status'   => 'new', 
                 'is_locked'      => false, 
                 'vehicle_plate'  => $data['vehicle_plate'] ?? ($data['car_plate_number'] ?? null),
                 'security_notes' => $data['security_notes'] ?? null,
@@ -66,7 +89,6 @@ class ReservationService
         return DB::transaction(function () use ($reservation, $data) {
             $user = Auth::user();
 
-            // إذا كان الحجز مقفلاً، نتحقق من الدور ومن وجود "سبب التعديل"
             if ($reservation->is_locked) {
                 if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
                     throw new \Exception("هذا الحجز مقفل أمنياً؛ لا تملك صلاحية التعديل بعد التدقيق.");
@@ -88,7 +110,6 @@ class ReservationService
 
     /**
      * عملية التدقيق والقفل (Core Audit Logic)
-     * هذه الدالة تنفذ البند 3 و 4 من الوثيقة
      */
     public function auditAndLock($reservationId, $notes = null)
     {
@@ -98,7 +119,7 @@ class ReservationService
 
             // 1. فحص القائمة السوداء تلقائياً قبل الاعتماد
             foreach ($reservation->occupants as $guest) {
-                if ($guest->is_blacklisted) { // نفترض وجود هذا الحقل في موديل النزيل
+                if ($guest->is_blacklisted) {
                     $reservation->update(['audit_status' => 'flagged']);
                     Log::warning("Security Alert: Blacklisted guest detected in Reservation #{$reservationId}");
                     throw new \Exception("تنبيه أمني: لا يمكن تدقيق الحجز لوجود نزيل في القائمة السوداء.");
@@ -120,7 +141,7 @@ class ReservationService
     }
 
     /**
-     * إنهاء الإقامة (Check-out) مع تحديث الحالة الفعلية
+     * إنهاء الإقامة (Check-out) 
      */
     public function checkOut(Reservation $reservation)
     {
@@ -152,14 +173,21 @@ class ReservationService
         $newRoom->update(['status' => 'occupied']);
     }
 
+    /**
+     * تخزين الوثائق (تم معالجة جميع حقول الـ SQL المطلوبة)
+     */
     public function storeGuestDocument($guestId, $reservationId, $file)
     {
+        // حساب البيانات لتجنب خطأ "Field doesn't have a default value"
         $fileHash = hash_file('sha256', $file->getRealPath());
+        
         $path = $file->storeAs(
             "security/docs/res_{$reservationId}", 
             Str::uuid() . '.' . $file->getClientOriginalExtension(), 
             'private' 
         );
+
+        
 
         return GuestDocument::create([
             'reservation_id' => $reservationId,
@@ -167,7 +195,7 @@ class ReservationService
             'file_path'      => $path,
             'file_name'      => $file->getClientOriginalName(),
             'file_hash'      => $fileHash,
-            'mime_type'      => $file->getMimeType(),
+            'mime_type'      => $file->getClientMimeType() ?? $file->getMimeType(),
             'file_size'      => $file->getSize(),
             'document_type'  => 'identity_image',
             'uploaded_by'    => Auth::id()
