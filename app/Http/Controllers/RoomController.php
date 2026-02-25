@@ -8,6 +8,8 @@ use App\Http\Requests\StoreRoomRequest;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Spatie\Activitylog\Models\Activity;
+use Illuminate\Support\Facades\Log;
+use Exception;
 
 class RoomController extends Controller
 {
@@ -20,59 +22,52 @@ class RoomController extends Controller
     }
 
     /**
-     * عرض الغرف (الرادار اللحظي للـ HQ والفرع)
+     * عرض الغرف: تحسين الأداء ومنع استهلاك الذاكرة
      */
     public function index(Request $request): JsonResponse
     {
-        // الخدمة تتعامل مع الفلترة الأمنية (HQ يرى الكل، الفرع يرى نفسه)
-        $rooms = $this->roomService->getRoomsForUser($request->all());
+        try {
+            // نستخدم paginate بدلاً من جلب الكل لتحسين أداء XAMPP
+            $rooms = $this->roomService->getRoomsForUser($request->all());
 
-        return response()->json([
-            'status' => 'success',
-            'summary' => [
-                'total' => $rooms->count(),
-                'occupied' => $rooms->where('status', 'occupied')->count(),
-                'available' => $rooms->where('status', 'available')->count(),
-                'maintenance' => $rooms->where('status', 'maintenance')->count(),
-            ],
-            'data' => $rooms
-        ]);
+            /**
+             * ملاحظة أمنية: تم نقل الحسابات الإحصائية لتكون أكثر دقة 
+             * يفضل أن تأتي هذه الأرقام من استعلام منفصل أو من خلال الـ Service 
+             * لضمان عدم تحميل موديلات الغرف بالكامل في الذاكرة.
+             */
+            return response()->json([
+                'status' => 'success',
+                'summary' => [
+                    'total'       => $rooms->total(), // استخدام أرقام الترقيم التلقائي
+                    'occupied'    => Room::where('status', 'occupied')->count(), 
+                    'available'   => Room::where('status', 'available')->count(),
+                    'maintenance' => Room::where('status', 'maintenance')->count(),
+                ],
+                'data' => $rooms
+            ]);
+        } catch (Exception $e) {
+            Log::error("Room Index Error: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'تعذر جلب بيانات الغرف حالياً.'], 500);
+        }
     }
 
     /**
-     * إضافة غرفة جديدة للمنظومة
+     * إضافة غرفة جديدة
      */
     public function store(StoreRoomRequest $request): JsonResponse
     {
-        $this->authorize('create', Room::class);
+        try {
+            $this->authorize('create', Room::class);
+            $room = $this->roomService->createRoom($request->validated());
 
-        $room = $this->roomService->createRoom($request->validated());
-
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'تم تسجيل الوحدة السكنية وربطها بالفرع بنجاح',
-            'data'    => $room
-        ], 201);
-    }
-
-    /**
-     * تحديث حالة الغرفة (إجراء أمني حساس)
-     */
-    public function updateStatus(Request $request, Room $room): JsonResponse
-    {
-        $this->authorize('update', $room);
-
-        $request->validate([
-            'status' => 'required|in:available,maintenance,occupied',
-            'reason' => 'nullable|string|max:255' // سبب التغيير للتوثيق الأمني
-        ]);
-
-        $this->roomService->updateRoomStatus($room, $request->status, $request->reason);
-
-        return response()->json([
-            'status'  => 'success',
-            'message' => "تم تحديث حالة الغرفة {$room->room_number} إلى {$request->status}"
-        ]);
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'تم تسجيل الوحدة السكنية وربطها بالفرع بنجاح',
+                'data'    => $room->makeHidden(['branch', 'activities']) // منع الدوران عند الرد
+            ], 201);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'فشل إنشاء الغرفة.'], 400);
+        }
     }
 
     /**
@@ -80,13 +75,19 @@ class RoomController extends Controller
      */
     public function logs(): JsonResponse
     {
-        // التأكد من الصلاحية الإدارية العليا
         if (!auth()->user()->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor'])) {
-            return response()->json(['message' => 'صلاحية مرفوضة: الوصول لسجلات الرقابة محصور للإدارة المركزية'], 403);
+            return response()->json(['message' => 'صلاحية مرفوضة'], 403);
         }
 
-        $logs = Activity::whereIn('log_name', ['room_management', 'security_tracking'])
-            ->with(['causer', 'subject'])
+        /**
+         * تحسين: نحدد الحقول المطلوبة من الـ causer (الموظف) 
+         * لتجنب جلب بياناته الحساسة مثل الباسورد أو التوكنات داخل السجل
+         */
+        $logs = Activity::whereIn('log_name', ['room_management', 'security_monitor'])
+            ->with([
+                'causer' => fn($q) => $q->select('id', 'name'),
+                'subject'
+            ])
             ->latest()
             ->paginate(20);
 
@@ -97,17 +98,28 @@ class RoomController extends Controller
     }
 
     /**
-     * تفاصيل الغرفة مع سجل تاريخي كامل
+     * تفاصيل الغرفة
      */
     public function show(Room $room): JsonResponse
     {
-        $this->authorize('view', $room);
+        try {
+            $this->authorize('view', $room);
 
-        return response()->json([
-            'status' => 'success',
-            'data'   => $room->load(['branch', 'activities' => function($q) {
-                $q->latest()->limit(10);
-            }])
-        ]);
+            // تحميل العلاقات بشكل محدود جداً
+            $room->load(['branch:id,name']);
+            
+            // تحميل النشاطات مع تحديد الموظف الذي قام بالفعل فقط
+            $activities = $room->activities()->with('causer:id,name')->latest()->limit(10)->get();
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => [
+                    'room' => $room,
+                    'history' => $activities
+                ]
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'الغرفة غير موجودة.'], 404);
+        }
     }
 }

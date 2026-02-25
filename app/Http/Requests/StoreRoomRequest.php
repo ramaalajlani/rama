@@ -9,22 +9,20 @@ class StoreRoomRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        // التحقق من الصلاحية يتم عادة عبر الـ Policy في الـ Controller
         return true; 
     }
 
     public function rules(): array
     {
-        // جلب معرف الغرفة في حالة التحديث لتجنب تعارض الـ Unique مع نفسه
         $roomId = $this->route('room') instanceof \App\Models\Room 
             ? $this->route('room')->id 
             : $this->route('room');
 
         return [
-            // الفرع مطلوب دائماً لربط الغرفة بمكانها الصحيح
+            // الفرع: نتحقق من وجوده وأنه يخص صلاحيات المستخدم إذا لم يكن HQ
             'branch_id' => ['required', 'exists:branches,id'],
             
-            // تصحيح منطق الـ Unique ليشمل الطابق والفرع مع استثناء السجل الحالي عند التحديث
+            // رقم الغرفة: فحص فريد مركب (رقم الغرفة + الطابق + الفرع)
             'room_number' => [
                 'required', 
                 'string', 
@@ -37,14 +35,29 @@ class StoreRoomRequest extends FormRequest
 
             'floor_number' => ['required', 'integer', 'min:0'],
             'type'         => ['required', 'string', 'max:50'],
-            'status'       => ['nullable', 'in:available,occupied,maintenance'],
+            'status'       => ['required', 'in:available,occupied,maintenance'],
             'description'  => ['nullable', 'string', 'max:500'],
+            
+            // إضافة حقول للقدرة الاستيعابية (اختياري لكنه مفيد أمنياً)
+            'capacity'     => ['nullable', 'integer', 'min:1'],
         ];
     }
 
     /**
-     * تعريب أسماء الحقول لرسائل خطأ احترافية
+     * معالجة البيانات قبل التحقق (Sanitization)
      */
+    protected function prepareForValidation()
+    {
+        $this->merge([
+            // إزالة المسافات من رقم الغرفة لضمان دقة استعلام الـ Unique
+            'room_number' => trim($this->room_number),
+            // إذا كان المستخدم ليس HQ، نثبت فرعه تلقائياً لزيادة الأمان
+            'branch_id'   => auth()->user()->hasRole('hq_admin') ? $this->branch_id : auth()->user()->branch_id,
+            // تعيين حالة افتراضية إذا لم ترسل
+            'status'      => $this->status ?? 'available',
+        ]);
+    }
+
     public function attributes(): array
     {
         return [
@@ -59,10 +72,9 @@ class StoreRoomRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'room_number.unique' => 'رقم هذه الغرفة موجود بالفعل في هذا الطابق لهذا الفرع.',
-            'branch_id.exists'   => 'الفرع المحدد غير موجود في سجلاتنا.',
-            'floor_number.required' => 'يرجى تحديد الطابق لتنظيم خريطة الغرف.',
-            'status.in'          => 'حالة الغرفة المختارة غير معرفة بالنظام.',
+            'room_number.unique' => 'رقم الغرفة :value مسجل مسبقاً في هذا الطابق بهذا الفرع.',
+            'branch_id.exists'   => 'الفرع المختار غير صحيح.',
+            'status.in'          => 'يرجى اختيار حالة غرفة صالحة (متاحة، مشغولة، صيانة).',
         ];
     }
 }

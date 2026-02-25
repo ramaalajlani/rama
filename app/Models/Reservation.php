@@ -17,59 +17,55 @@ class Reservation extends Model
 {
     use SoftDeletes, HasFactory, LogsActivity;
 
-    // اسم الجدول في قاعدة البيانات
     protected $table = 'guest_reservations';
 
     protected $fillable = [
-        'room_id', 
-        'branch_id', 
-        'user_id', 
-        'check_in', 
-        'check_out', 
-        'is_locked', 
-        'locked_by', 
-        'status', 
-        'security_notes',
-        'vehicle_plate' 
+        'room_id', 'branch_id', 'user_id', 'check_in', 'check_out', 
+        'actual_check_out', 'is_locked', 'locked_by', 'audit_status',
+        'audited_at', 'audited_by', 'status', 'security_notes',
+        'audit_notes', 'vehicle_plate' 
     ];
 
     protected $casts = [
         'is_locked' => 'boolean',
         'check_in' => 'datetime',
         'check_out' => 'datetime',
+        'actual_check_out' => 'datetime',
+        'audited_at' => 'datetime',
     ];
 
-    // إضافة الوصول السريع للنزيل الأساسي عند تحويل الموديل لـ JSON
-    protected $appends = ['primary_guest'];
+    /**
+     * 1. إزالة primary_guest من الـ appends:
+     * هذا هو التعديل الأهم. لا تجعل الحجز يبحث عن النزلاء تلقائياً 
+     * لأنك تستدعي النزلاء بالفعل عبر with('occupants') في الـ Controller.
+     */
+    protected $appends = []; 
 
     /**
-     * إعدادات سجل التدقيق (Audit Log)
+     * 2. الحقول المخفية لمنع الدوران:
      */
+    protected $hidden = [
+        'branch',
+        'room',
+        'creator',
+        'auditor'
+    ];
+
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
             ->logOnly([
-                'status', 
-                'is_locked', 
-                'locked_by', 
-                'room_id', 
-                'check_in', 
-                'check_out', 
-                'security_notes',
-                'vehicle_plate'
+                'status', 'audit_status', 'is_locked', 'room_id', 
+                'check_in', 'check_out', 'vehicle_plate', 'audit_notes'
             ])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
             ->useLogName('security_monitor') 
-            ->setDescriptionForEvent(fn(string $eventName) => "تحرك أمني: تم إجراء عملية {$eventName} على سجل الإقامة رقم #{$this->id}");
+            ->setDescriptionForEvent(fn(string $eventName) => "إجراء أمني: تم {$eventName} سجل الإقامة رقم #{$this->id}");
     }
 
-    /**
-     * منطق التحكم التلقائي (Booted Strategy)
-     */
     protected static function booted()
     {
-        // النطاق العالمي: العزل الأمني بين الفروع (الموظف يرى بيانات فرعه فقط)
         static::addGlobalScope('branch_access', function (Builder $builder) {
             if (Auth::check() && !app()->runningInConsole()) {
                 $user = Auth::user();
@@ -79,14 +75,12 @@ class Reservation extends Model
             }
         });
 
-        // تعبئة البيانات تلقائياً عند الإنشاء
         static::creating(function ($reservation) {
             if (Auth::check()) {
                 $user = Auth::user();
-                if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
-                    $reservation->branch_id = $reservation->branch_id ?? $user->branch_id;
-                }
+                $reservation->branch_id = $reservation->branch_id ?? $user->branch_id;
                 $reservation->user_id = $reservation->user_id ?? $user->id;
+                $reservation->audit_status = $reservation->audit_status ?? 'new';
             }
         });
     }
@@ -97,77 +91,44 @@ class Reservation extends Model
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * النزلاء المسجلين في هذا الحجز
-     * تم التعديل ليطابق اسم جدول الـ Migration: reservation_guest
-     */
     public function occupants(): BelongsToMany
     {
         return $this->belongsToMany(Guest::class, 'reservation_guest', 'reservation_id', 'guest_id')
-                    ->withPivot([
-                        'participant_type', 
-                        'vehicle_plate_at_checkin', 
-                        'registered_by' // الحقل الرقابي الجديد
-                    ])
+                    ->withPivot(['participant_type', 'vehicle_plate_at_checkin', 'registered_by'])
                     ->withTimestamps();
     }
 
-    /**
-     * علاقة بديلة (Alias) لمنع أخطاء Call to undefined method guests()
-     */
-    public function guests(): BelongsToMany
-    {
-        return $this->occupants();
-    }
-
-    public function room(): BelongsTo 
-    { 
-        return $this->belongsTo(Room::class); 
-    }
-    
-    public function branch(): BelongsTo 
-    { 
-        return $this->belongsTo(Branch::class); 
-    }
-    
-    public function creator(): BelongsTo 
-    { 
-        return $this->belongsTo(User::class, 'user_id'); 
-    }
-    
-    public function locker(): BelongsTo 
-    { 
-        return $this->belongsTo(User::class, 'locked_by'); 
-    }
-    
-    public function documents(): HasMany 
-    { 
-        return $this->hasMany(GuestDocument::class, 'reservation_id'); 
-    }
+    public function guests(): BelongsToMany { return $this->occupants(); }
+    public function room(): BelongsTo { return $this->belongsTo(Room::class); }
+    public function branch(): BelongsTo { return $this->belongsTo(Branch::class); }
+    public function creator(): BelongsTo { return $this->belongsTo(User::class, 'user_id'); }
+    public function locker(): BelongsTo { return $this->belongsTo(User::class, 'locked_by'); }
+    public function auditor(): BelongsTo { return $this->belongsTo(User::class, 'audited_by'); }
+    public function documents(): HasMany { return $this->hasMany(GuestDocument::class, 'reservation_id'); }
 
     /*
     |--------------------------------------------------------------------------
-    | الوصول السريع (Accessors) و Scopes
+    | Accessors & Scopes
     |--------------------------------------------------------------------------
     */
 
     /**
-     * جلب النزيل الأساسي بناءً على نوع المشاركة في الجدول الوسيط
+     * تعديل Accessor: نجعله يتحقق إذا كانت العلاقة محملة مسبقاً 
+     * لمنع استعلامات SQL إضافية أثناء التحويل لـ JSON.
      */
     public function getPrimaryGuestAttribute()
     {
-        return $this->occupants()->wherePivot('participant_type', 'primary')->first();
+        if (!$this->relationLoaded('occupants')) {
+            return null;
+        }
+        return $this->occupants->where('pivot.participant_type', 'primary')->first();
     }
 
-    public function scopeArrivingToday($query) { return $query->whereDate('check_in', today()); }
-    
-    public function scopeDepartingToday($query) { return $query->whereDate('check_out', today()); }
-    
+    public function scopePendingAudit($query) { return $query->where('audit_status', 'new'); }
+    public function scopeAudited($query) { return $query->where('audit_status', 'audited'); }
+
     public function scopeCurrentlyIn($query) { 
         return $query->where('status', 'confirmed')
-                     ->where('check_in', '<=', now())
-                     ->where(function($q) {
-                         $q->whereNull('check_out')->orWhere('check_out', '>=', now());
-                     });
+                     ->whereNull('actual_check_out');
     }
 }

@@ -15,19 +15,16 @@ class StoreReservationRequest extends FormRequest
     public function rules(): array
     {
         return [
-            // --- بيانات الحجز ---
+            // --- بيانات الحجز الأساسية ---
             'branch_id'        => ['required', 'exists:branches,id'],
             'room_id'          => ['required', 'exists:rooms,id'],
-            'check_in'         => ['required', 'date'], 
+            'check_in'         => ['required', 'date', 'after_or_equal:today'], 
             'check_out'        => ['required', 'date', 'after:check_in'],
-            'status'           => ['nullable', 'string', 'in:confirmed,pending,checked_in'],
-            'security_notes'   => ['nullable', 'string'],
-            
-            // تم توحيد المسمى ليطابق الموديل وقاعدة البيانات لضمان الحفظ التلقائي
+            'status'           => ['nullable', 'string', 'in:confirmed,pending,checked_in,checked_out'],
+            'security_notes'   => ['nullable', 'string', 'max:1000'],
             'vehicle_plate'    => ['nullable', 'string', 'max:20'], 
-            'car_model'        => ['nullable', 'string', 'max:50'],
 
-            // --- مصفوفة النزلاء ---
+            // --- مصفوفة النزلاء (Occupants) ---
             'occupants'                   => ['required', 'array', 'min:1'], 
             'occupants.*.first_name'      => ['required', 'string', 'max:50'],
             'occupants.*.father_name'     => ['required', 'string', 'max:50'], 
@@ -37,14 +34,14 @@ class StoreReservationRequest extends FormRequest
             'occupants.*.id_type'         => ['required', 'string', 'in:national_id,passport,residency'],
             'occupants.*.nationality'     => ['required', 'string', 'max:100'],
             'occupants.*.phone'           => ['nullable', 'string', 'max:20'],
-            'occupants.*.is_primary'      => ['required'], // سنعالجها كـ Boolean في prepareForValidation
+            'occupants.*.is_primary'      => ['required'], 
 
-            // تصحيح شرط الصورة: إجبارية فقط للنزيل الرئيسي
+            // الوثائق: البند 2 (صور فقط)
             'occupants.*.id_image'        => [
                 'nullable',
                 'image', 
-                'mimes:jpg,jpeg,png', 
-                'max:4096' 
+                'mimes:jpg,jpeg,png,webp', 
+                'max:4096' // 4MB لتجنب إجهاد السيرفر عند الرفع
             ],
         ];
     }
@@ -55,23 +52,24 @@ class StoreReservationRequest extends FormRequest
         
         if (is_array($occupants)) {
             foreach ($occupants as $key => $occupant) {
+                // 1. تنظيف أرقام الهوية وتوحيدها (Data Normalization)
                 if (isset($occupant['national_id'])) {
-                    $occupants[$key]['national_id'] = str_replace([' ', '-', '_'], '', $occupant['national_id']);
+                    $occupants[$key]['national_id'] = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $occupant['national_id']));
                 }
 
-                // تحويل القيم النصية القادمة من FormData إلى Boolean حقيقي
+                // 2. معالجة قيم Boolean القادمة من FormData
                 if (isset($occupant['is_primary'])) {
                     $val = $occupant['is_primary'];
-                    $occupants[$key]['is_primary'] = ($val === 'true' || $val === '1' || $val === 1 || $val === true);
+                    $occupants[$key]['is_primary'] = filter_var($val, FILTER_VALIDATE_BOOLEAN);
                 }
             }
         }
 
-        // توحيد مسمى رقم السيارة القادم من الواجهة car_plate_number إلى vehicle_plate
         $this->merge([
             'occupants'     => $occupants,
-            'vehicle_plate' => $this->vehicle_plate ?? $this->car_plate_number,
-            'branch_id'     => $this->branch_id ?? (auth()->check() ? auth()->user()->branch_id : null),
+            'branch_id'     => $this->branch_id ?? auth()->user()->branch_id,
+            // توحيد مسمى لوحة السيارة
+            'vehicle_plate' => trim($this->vehicle_plate ?? $this->car_plate_number ?? ''),
         ]);
     }
 
@@ -79,13 +77,29 @@ class StoreReservationRequest extends FormRequest
     {
         $validator->after(function ($validator) {
             $occupants = $this->input('occupants', []);
-            $primaryCount = collect($occupants)->filter(function($guest) {
-                return ($guest['is_primary'] === true || $guest['is_primary'] === 1 || $guest['is_primary'] === 'true');
-            })->count();
-
+            
+            // 1. فحص النزيل الرئيسي
+            $primaryCount = collect($occupants)->where('is_primary', true)->count();
             if ($primaryCount !== 1) {
-                $validator->errors()->add('occupants', 'يجب تحديد نزيل رئيسي واحد فقط لهذه العملية.');
+                $validator->errors()->add('occupants', 'يجب تحديد نزيل رئيسي واحد فقط (Primary Guest).');
+            }
+
+            // 2. فحص تكرار الهوية داخل نفس الطلب (منع الخطأ البشري)
+            $ids = collect($occupants)->pluck('national_id')->toArray();
+            if (count($ids) !== count(array_unique($ids))) {
+                $validator->errors()->add('occupants', 'لا يمكن تكرار رقم الهوية لأكثر من نزيل في نفس الحجز.');
             }
         });
+    }
+
+    public function messages(): array
+    {
+        return [
+            'occupants.*.first_name.required'  => 'الاسم الأول مطلوب لكل فرد.',
+            'occupants.*.national_id.required' => 'رقم الهوية إلزامي للتدقيق الأمني.',
+            'occupants.*.mother_name.required' => 'اسم الأم مطلوب (لأغراض المطابقة الثلاثية في القائمة السوداء).',
+            'occupants.*.id_image.max'         => 'حجم صورة الهوية كبير جداً، الحد الأقصى 4 ميجابايت.',
+            'check_out.after'                  => 'تاريخ المغادرة يجب أن يكون بعد تاريخ الدخول.',
+        ];
     }
 }

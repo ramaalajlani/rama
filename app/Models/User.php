@@ -16,10 +16,6 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable, HasRoles, LogsActivity;
 
-    /**
-     * تحديد الـ Guard الافتراضي للموديل
-     * هذا يضمن توافق الصلاحيات مع Sanctum بشكل تلقائي
-     */
     protected $guard_name = 'api';
 
     protected $fillable = [
@@ -30,9 +26,19 @@ class User extends Authenticatable
         'status', 
     ];
 
+    /**
+     * 1. تحصين الحقول المخفية:
+     * أضفت 'branch' و 'reservations' و 'roles' و 'permissions' للمخفيات.
+     * هذا يمنع Laravel من محاولة تحويل كل صلاحيات وأدوار وحجوزات المستخدم إلى JSON 
+     * تلقائياً عند جلب "الحجز"، مما يكسر حلقة الدوران اللانهائية تماماً.
+     */
     protected $hidden = [
         'password',
         'remember_token',
+        'branch',
+        'reservations',
+        'roles',
+        'permissions',
     ];
 
     protected $casts = [
@@ -74,21 +80,16 @@ class User extends Authenticatable
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * التحقق مما إذا كان الحساب نشطاً
-     */
     public function isActive(): bool
     {
         return $this->status === 'active';
     }
 
-    /**
-     * التحقق مما إذا كان المستخدم يتبع للمركز الرئيسي (HQ)
-     */
     public function isHQ(): bool
     {
         return is_null($this->branch_id);
     }
+
     public function getFullNameAttribute(): string
     {
         return $this->name;

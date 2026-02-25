@@ -26,8 +26,18 @@ class Room extends Model
     ];
 
     /**
+     * 1. الحقول المخفية (Hidden):
+     * نمنع تحميل العلاقات بشكل تلقائي عند تحويل الموديل إلى JSON
+     * لكسر أي حلقة دوران مع الحجوزات أو الفروع.
+     */
+    protected $hidden = [
+        'reservations',
+        'branch',
+        'deleted_at'
+    ];
+
+    /**
      * إعدادات سجل التدقيق (Audit Log)
-     * ضروري جداً للـ HQ لمراقبة "حركة الغرف" ومنع التسكين غير الرسمي
      */
     public function getActivitylogOptions(): LogOptions
     {
@@ -35,7 +45,7 @@ class Room extends Model
             ->logOnly(['room_number', 'floor_number', 'status', 'branch_id'])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
-            ->useLogName('security_monitor') // توحيد السجل مع النظام الأمني المركزي
+            ->useLogName('security_monitor') 
             ->setDescriptionForEvent(function(string $eventName) {
                 return "إدارة المرافق: تم {$eventName} بيانات الغرفة {$this->room_number} (الطابق: {$this->floor_number})";
             });
@@ -47,18 +57,11 @@ class Room extends Model
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * الفرع التابعة له الغرفة
-     */
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
     }
 
-    /**
-     * الحجوزات التاريخية والنشطة المرتبطة بهذه الغرفة
-     * ملاحظة: تم التأكد من اسم الموديل Reservation كما اعتمدناه سابقاً
-     */
     public function reservations(): HasMany
     {
         return $this->hasMany(Reservation::class, 'room_id');
@@ -66,23 +69,20 @@ class Room extends Model
 
     /*
     |--------------------------------------------------------------------------
-    | النطاقات الأمنية (Scopes) - لتسهيل عرض حالة الفندق في HQ
+    | النطاقات (Scopes)
     |--------------------------------------------------------------------------
     */
 
-    // الغرف الجاهزة لاستقبال نزلاء
     public function scopeAvailable($query)
     {
         return $query->where('status', 'available');
     }
 
-    // الغرف التي تحت الصيانة (مغلقة أمنياً أو فنياً)
     public function scopeInMaintenance($query)
     {
         return $query->where('status', 'maintenance');
     }
 
-    // الغرف المسكونة حالياً (تظهر لكِ من يسكن في أي طابق)
     public function scopeOccupied($query)
     {
         return $query->where('status', 'occupied');

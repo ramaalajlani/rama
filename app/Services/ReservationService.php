@@ -17,30 +17,26 @@ class ReservationService
     }
 
     /**
-     * إنشاء حجز جديد مع التحقق من الصلاحيات وحالة الغرفة
+     * إنشاء حجز جديد (البند 3: الحالة الافتراضية "جديد")
      */
     public function storeReservation(array $data)
     {
         return DB::transaction(function () use ($data) {
             $user = Auth::user();
             
-            // قفل سجل الغرفة لمنع الحجز المزدوج (Race Conditions)
-            // استخدام lockForUpdate يضمن عدم قدرة موظف آخر على حجزها في نفس اللحظة
+            // منع الحجز المزدوج برمجياً
             $room = Room::lockForUpdate()->findOrFail($data['room_id']);
 
-            // 1. عزل الفروع: التأكد من أن الموظف يحجز في فرعه فقط (إلا إذا كان HQ)
+            // 1. عزل الفروع أمنياً
             if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_security']) && $room->branch_id !== $user->branch_id) {
                 throw new \Exception("اختراق صلاحيات: لا يمكنك الوصول لغرف خارج نطاق فرعك التشغيلي.");
             }
 
-            // 2. التحقق من حالة الغرفة
-            // تم تعديل الرسالة ليتم التقاطها في الواجهة الأمامية كـ "غرفة محجوزة"
             if ($room->status !== 'available') {
-                throw new \Exception("عذراً، الغرفة رقم ({$room->room_number}) محجوزة حالياً لنزيل آخر.");
+                throw new \Exception("عذراً، الغرفة رقم ({$room->room_number}) محجوزة حالياً.");
             }
 
-            // 3. إنشاء سجل الحجز الأساسي
-            // تصحيح: إضافة فحص مرن لجلب رقم السيارة من أي مسمى (vehicle_plate أو car_plate_number)
+            // 2. إنشاء الحجز مع ضبط حالة التدقيق كـ "جديد"
             $reservation = Reservation::create([
                 'room_id'        => $data['room_id'],
                 'branch_id'      => $data['branch_id'] ?? $user->branch_id, 
@@ -48,40 +44,41 @@ class ReservationService
                 'check_in'       => $data['check_in'],
                 'check_out'      => $data['check_out'],
                 'status'         => $data['status'] ?? 'confirmed',
+                'audit_status'   => 'new', // متطلب وثيقة الاعتماد
                 'is_locked'      => false, 
-                // هنا الحل الجذري لمشكلة عدم الحفظ:
                 'vehicle_plate'  => $data['vehicle_plate'] ?? ($data['car_plate_number'] ?? null),
                 'security_notes' => $data['security_notes'] ?? null,
             ]);
 
-            // 4. تحديث حالة الغرفة
             $room->update(['status' => 'occupied']);
 
-            Log::info("Security Log: New Reservation #{$reservation->id} created by User #{$user->id}");
+            Log::info("Security Log: New Reservation #{$reservation->id} initialized by User #{$user->id}");
 
             return $reservation;
         });
     }
 
     /**
-     * تحديث بيانات حجز (مع احترام القفل الأمني المركزي)
+     * تحديث البيانات مع فرض "سبب التعديل" إذا كان الحجز مقفلاً (البند 4)
      */
     public function updateReservation(Reservation $reservation, array $data)
     {
         return DB::transaction(function () use ($reservation, $data) {
-            // التحقق من القفل الأمني قبل التعديل
-            if ($reservation->is_locked && !Auth::user()->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
-                throw new \Exception("هذا الحجز مقفل أمنياً؛ يرجى مراجعة الإدارة المركزية لفك القفل أولاً.");
+            $user = Auth::user();
+
+            // إذا كان الحجز مقفلاً، نتحقق من الدور ومن وجود "سبب التعديل"
+            if ($reservation->is_locked) {
+                if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
+                    throw new \Exception("هذا الحجز مقفل أمنياً؛ لا تملك صلاحية التعديل بعد التدقيق.");
+                }
+
+                if (empty($data['audit_notes'])) {
+                    throw new \Exception("يجب إدخال سبب التعديل الاستثنائي للحجوزات المقفلة.");
+                }
             }
 
-            // إذا تغيرت الغرفة، نقوم بتحرير القديمة وحجز الجديدة
             if (isset($data['room_id']) && $reservation->room_id != $data['room_id']) {
                 $this->switchRooms($reservation->room_id, $data['room_id']);
-            }
-
-            // تحديث رقم السيارة إذا كان موجوداً في طلب التعديل
-            if (isset($data['car_plate_number'])) {
-                $data['vehicle_plate'] = $data['car_plate_number'];
             }
 
             $reservation->update($data);
@@ -90,17 +87,46 @@ class ReservationService
     }
 
     /**
-     * إنهاء الإقامة (Check-out)
+     * عملية التدقيق والقفل (Core Audit Logic)
+     * هذه الدالة تنفذ البند 3 و 4 من الوثيقة
+     */
+    public function auditAndLock($reservationId, $notes = null)
+    {
+        return DB::transaction(function () use ($reservationId, $notes) {
+            $reservation = Reservation::with('occupants')->findOrFail($reservationId);
+            $user = Auth::user();
+
+            // 1. فحص القائمة السوداء تلقائياً قبل الاعتماد
+            foreach ($reservation->occupants as $guest) {
+                if ($guest->is_blacklisted) { // نفترض وجود هذا الحقل في موديل النزيل
+                    $reservation->update(['audit_status' => 'flagged']);
+                    Log::warning("Security Alert: Blacklisted guest detected in Reservation #{$reservationId}");
+                    throw new \Exception("تنبيه أمني: لا يمكن تدقيق الحجز لوجود نزيل في القائمة السوداء.");
+                }
+            }
+
+            // 2. تحديث الحالة للقفل النهائي
+            $reservation->update([
+                'audit_status' => 'audited',
+                'is_locked'    => true,
+                'audited_at'   => now(),
+                'audited_by'   => $user->id,
+                'locked_by'    => $user->id,
+                'audit_notes'  => $notes
+            ]);
+
+            return $reservation;
+        });
+    }
+
+    /**
+     * إنهاء الإقامة (Check-out) مع تحديث الحالة الفعلية
      */
     public function checkOut(Reservation $reservation)
     {
         return DB::transaction(function () use ($reservation) {
-            if ($reservation->is_locked) {
-                throw new \Exception("لا يمكن إنهاء الإقامة؛ الحجز قيد المراجعة الأمنية والقفل مفعل.");
-            }
-
-            if ($reservation->status === 'checked_out') {
-                throw new \Exception("هذا الحجز مغلق مسبقاً في النظام.");
+            if ($reservation->is_locked && !Auth::user()->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
+                throw new \Exception("لا يمكن إنهاء الإقامة؛ الحجز قيد المراجعة الأمنية المركزية.");
             }
 
             $reservation->update([
@@ -108,40 +134,27 @@ class ReservationService
                 'actual_check_out' => Carbon::now(),
             ]);
 
-            // تحرير الغرفة وجعلها متاحة فوراً
             $reservation->room->update(['status' => 'available']);
             
             return $reservation;
         });
     }
 
-    /**
-     * تبديل الغرف: تحرير القديمة وقفل الجديدة
-     */
     protected function switchRooms($oldRoomId, $newRoomId)
     {
-        // جعل الغرفة القديمة متاحة
         Room::where('id', $oldRoomId)->update(['status' => 'available']);
-        
-        // قفل وفحص الغرفة الجديدة
         $newRoom = Room::lockForUpdate()->findOrFail($newRoomId);
+        
         if ($newRoom->status !== 'available') {
-            throw new \Exception("فشل التبديل: الغرفة الجديدة ({$newRoom->room_number}) غير متاحة.");
+            throw new \Exception("الغرفة الجديدة غير متاحة.");
         }
         
         $newRoom->update(['status' => 'occupied']);
     }
 
-    /**
-     * أرشفة الوثائق الأمنية (Private Vault)
-     */
     public function storeGuestDocument($guestId, $reservationId, $file)
     {
-        // توليد بصمة رقمية للملف لضمان النزاهة الأمنية
         $fileHash = hash_file('sha256', $file->getRealPath());
-        
-        // التخزين في مسار محمي
-        // تأكدي أن 'private' معرف في config/filesystems.php
         $path = $file->storeAs(
             "security/docs/res_{$reservationId}", 
             Str::uuid() . '.' . $file->getClientOriginalExtension(), 

@@ -18,7 +18,6 @@ use App\Http\Controllers\{
 |--------------------------------------------------------------------------
 */
 Route::post('/login', [AuthController::class, 'login']);
-Route::post('/refresh-token', [AuthController::class, 'refresh']);
 
 /*
 |--------------------------------------------------------------------------
@@ -27,89 +26,76 @@ Route::post('/refresh-token', [AuthController::class, 'refresh']);
 */
 Route::middleware('auth:sanctum')->group(function () {
 
-    // 1. فحص الحالة الشخصية
+    // 1. فحص الحالة الشخصية (User Profile & State)
     Route::get('/user-status', function (Request $request) {
         return response()->json([
             'status'      => 'success',
-            'user_name'   => $request->user()->full_name, // تأكدي من استخدام full_name
-            'active_role' => $request->user()->getRoleNames(),
-            'branch_id'   => $request->user()->branch_id,
+            'user'        => [
+                'name'    => $request->user()->name,
+                'roles'   => $request->user()->getRoleNames(),
+                'branch'  => $request->user()->branch_id,
+                'status'  => $request->user()->status
+            ]
         ]);
     });
 
-    // 2. إدارة النزلاء (Guest Intelligence)
-    Route::prefix('guests')->group(function () {
-        // البحث المتقدم (الذي يدعم الـ SQL CONCAT الذي كتبناه في الـ Service)
-   Route::post('/search', [GuestController::class, 'search'])
-             ->middleware('role:branch_reception|hq_admin|hq_supervisor|hq_security|hq_auditor,api');
-        
-        // مسار خاص للتدقيق في "بصمة النزيل" (Fingerprint Check)
-        Route::post('/verify-hashes', [GuestController::class, 'verifyHashes'])
-             ->middleware('role:hq_security|hq_admin,api');
-
-        // فك قفل النزيل (المهم جداً للنزلاء الذين تم تدقيقهم)
-        Route::patch('/{guest}/unlock', [GuestController::class, 'unlock'])
-             ->middleware('role:hq_admin|hq_security|hq_auditor,api');
-    });
-
-    Route::apiResource('guests', GuestController::class);
-
-    // 3. منظومة الأمن والقائمة السوداء (Security Command Center)
+    // 2. منظومة الأمن (Security & Blacklist)
     Route::prefix('security')->group(function () {
-        
-        // رادار التنبيهات (Real-time Alerts Radar)
         Route::middleware('role:hq_admin|hq_security|hq_auditor,api')->group(function () {
             Route::get('/blacklist', [SecurityBlacklistController::class, 'index']);
             Route::get('/notifications', [SecurityBlacklistController::class, 'getNotifications']);
-            Route::get('/notifications/unread-count', [SecurityBlacklistController::class, 'unreadCount']); // مسار جديد للعداد
+            Route::get('/notifications/unread-count', [SecurityBlacklistController::class, 'unreadCount']);
             Route::patch('/notifications/{id}/read', [SecurityBlacklistController::class, 'markAsRead']);
         });
 
-        // إدارة القائمة السوداء (إضافة هاشات جديدة)
         Route::middleware('role:hq_admin|hq_security,api')->group(function () {
             Route::post('/blacklist/add', [SecurityBlacklistController::class, 'store']);
-            Route::delete('/blacklist/{id}', [SecurityBlacklistController::class, 'destroy']);
         });
     });
 
-    // 4. محرك الحجوزات (Reservations Engine)
+    // 3. محرك الحجوزات المطور (Advanced Reservations Engine)
     Route::prefix('reservations')->group(function () {
-        // العرض اليومي والفلترة حسب الفرع
-        Route::get('/daily-list', [ReservationController::class, 'dailyList']);
         
-        // الخروج (Check-out) - الذي يحرر الغرفة ويتحقق من الـ is_locked
+        // أ) مسار التدقيق والقفل (Audit & Lock) - الأهم في الوثيقة
+        Route::post('/{id}/audit', [ReservationController::class, 'audit'])
+             ->middleware('role:hq_admin|hq_supervisor|hq_security|hq_auditor,api');
+        
+        // ب) تسجيل الخروج (Check-out)
         Route::post('/{reservation}/checkout', [ReservationController::class, 'checkOut']);
-        
-        // عرض الوثائق (التي يتم جلبها من الـ Private Storage عبر الـ Service)
-        Route::get('/{reservation}/documents/{document}', [ReservationController::class, 'viewDocument'])
-             ->middleware('role:hq_admin|hq_security|hq_auditor,api');
 
-        // التحكم في القفل الأمني للحجز
+        // ج) إدارة القفل اليدوي (Toggle Lock)
         Route::patch('/{id}/toggle-lock', [ReservationController::class, 'toggleLock'])
              ->middleware('role:hq_admin|hq_security,api');
 
-        // استعادة المحذوفات (Soft Deletes)
-        Route::post('/{id}/restore', [ReservationController::class, 'restore'])
-             ->middleware('role:hq_admin|hq_auditor,api');
+        // د) عرض الوثائق الأمنية
+        Route::get('/{reservation}/documents', [ReservationController::class, 'viewDocuments'])
+             ->middleware('role:branch_reception|hq_admin|hq_security|hq_auditor,api');
     });
 
+    // مسارات الـ CRUD للحجوزات (تستخدم index, store, update, show)
     Route::apiResource('reservations', ReservationController::class);
 
-    // 5. إدارة الغرف (Rooms Management)
+    // 4. إدارة النزلاء (Guests)
+    Route::prefix('guests')->group(function () {
+        Route::post('/search', [GuestController::class, 'search']);
+        // مسار خاص للتحقق من الهاشات (Fingerprint Check)
+        Route::post('/verify-hashes', [GuestController::class, 'verifyHashes'])
+             ->middleware('role:hq_security|hq_admin,api');
+    });
+    Route::apiResource('guests', GuestController::class);
+
+    // 5. إدارة الغرف (Rooms)
     Route::prefix('rooms')->group(function () {
         Route::get('/', [RoomController::class, 'index']);
-        Route::get('/logs', [RoomController::class, 'logs'])
-             ->middleware('role:hq_admin|hq_auditor,api');
-        
         Route::patch('/{room}/status', [RoomController::class, 'updateStatus'])
              ->middleware('role:hq_admin|hq_supervisor|branch_reception,api');
     });
 
-    // 6. الإدارة والرقابة (HQ Admin Panel)
+    // 6. الإدارة المركزية (System Admin)
     Route::middleware('role:hq_admin,api')->group(function () {
         Route::apiResource('branches', BranchController::class);
         Route::apiResource('users', UserController::class);
-        Route::get('/system-audit-logs', [UserController::class, 'auditLogs']); // سجل العمليات الشامل
+        Route::get('/audit-logs', [UserController::class, 'systemLogs']);
     });
 
     Route::post('/logout', [AuthController::class, 'logout']);

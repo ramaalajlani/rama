@@ -5,69 +5,107 @@ namespace App\Services;
 use App\Models\Guest;
 use App\Models\SecurityBlacklist;
 use App\Models\SecurityNotification;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\{Log, DB};
+use Exception;
 
 class GuestService
 {
     /**
-     * معالجة النزيل: تسجيله أو تحديث بياناته مع الفحص الأمني
+     * معالجة النزيل: تسجيله أو تحديث بياناته مع الفحص الأمني المطور
      */
     public function storeOrUpdateGuest(array $data)
     {
-        // 1. توليد الهاش الأمني للهوية (للتعرف الصامت)
-        $idHash = hash('sha256', $data['national_id']);
-
-        // 2. الفحص الأمني المسبق في القائمة السوداء
-        $blacklistMatch = SecurityBlacklist::where('national_id_hash', $idHash)->first();
-
-        // 3. تحديد الحالة الأمنية للنزيل بناءً على الفحص
-        if ($blacklistMatch) {
-            $data['status'] = 'blacklisted';
-            $data['is_flagged'] = true;
+        return DB::transaction(function () use ($data) {
+            // 1. تنظيف البيانات وتوليد الهاشات الأمنية
+            $nationalId = trim($data['national_id']);
+            $idHash = hash('sha256', $nationalId);
             
-            // تسجيل محاولة دخول شخص محظور فوراً
-            $this->createSecurityAlert($data, $blacklistMatch);
-        }
+            // توليد هاش الاسم الكامل (Triple Check) مع إزالة المسافات وتوحيد حالة الأحرف
+            $firstName = trim($data['first_name']);
+            $fatherName = trim($data['father_name'] ?? '');
+            $lastName = trim($data['last_name']);
+            
+            $fullName = "{$firstName} {$fatherName} {$lastName}";
+            // الهاش الأمني يعتمد على الاسم ملتصقاً لمنع التلاعب بالمسافات
+            $cleanName = mb_strtolower(str_replace(' ', '', $fullName), 'UTF-8');
+            $fullSecurityHash = hash('sha256', $cleanName);
 
-        // 4. البحث عن النزيل في سجلاتنا السابقة لتجنب التكرار
-        $guest = Guest::updateOrCreate(
-            ['national_id' => $data['national_id']],
-            [
-                'full_name'   => $data['full_name'],
-                'id_type'     => $data['id_type'],
-                'phone'       => $data['phone'],
-                'email'       => $data['email'] ?? null,
-                'nationality' => $data['nationality'],
-                'address'     => $data['address'] ?? null,
-                'status'      => $data['status'] ?? 'active',
-                'is_flagged'  => $data['is_flagged'] ?? false,
-                'national_id_hash' => $idHash // تخزين الهاش للمطابقة المستقبلية
-            ]
-        );
+            // 2. الفحص الأمني المسبق (عبر الهوية أو هاش الاسم)
+            $blacklistMatch = SecurityBlacklist::where('national_id_hash', $idHash)
+                ->orWhere('full_security_hash', $fullSecurityHash)
+                ->first();
 
-        return $guest;
+            // 3. تحديد الحالة الأمنية
+            if ($blacklistMatch) {
+                $data['status'] = 'blacklisted';
+                $data['is_flagged'] = true;
+                
+                // تسجيل التنبيه الأمني فوراً
+                $this->createSecurityAlert($fullName, $nationalId, $blacklistMatch);
+            }
+
+            // 4. الحفظ أو التحديث
+            $guest = Guest::updateOrCreate(
+                ['national_id' => $nationalId],
+                [
+                    'first_name'         => $firstName,
+                    'father_name'        => $fatherName,
+                    'last_name'          => $lastName,
+                    'mother_name'        => $data['mother_name'] ?? null,
+                    'id_type'            => $data['id_type'],
+                    'nationality'        => $data['nationality'],
+                    'phone'              => $data['phone'],
+                    'email'              => $data['email'] ?? null,
+                    'address'            => $data['address'] ?? null,
+                    'status'             => $data['status'] ?? 'active',
+                    'is_flagged'         => $data['is_flagged'] ?? false,
+                    'national_id_hash'   => $idHash,
+                    'full_security_hash' => $fullSecurityHash,
+                    'audit_status'       => 'new' 
+                ]
+            );
+
+            return $guest;
+        });
+    }
+
+    /**
+     * البحث الذكي: تحسين الأداء باستخدام Select محدد
+     */
+    public function searchGuests(string $queryText)
+    {
+        $queryText = trim($queryText);
+        return Guest::select('id', 'first_name', 'last_name', 'national_id', 'status', 'is_flagged', 'audit_status')
+            ->where('national_id', 'like', "{$queryText}%") // البحث من البداية أسرع في الفهرسة
+            ->orWhere('first_name', 'like', "%{$queryText}%")
+            ->orWhere('last_name', 'like', "%{$queryText}%")
+            ->limit(10)
+            ->get();
     }
 
     /**
      * إنشاء تنبيه أمني وإرساله للـ HQ
      */
-    protected function createSecurityAlert(array $guestData, SecurityBlacklist $blacklistMatch)
+    protected function createSecurityAlert(string $fullName, string $nationalId, SecurityBlacklist $blacklistMatch)
     {
-        SecurityNotification::create([
-            'blacklist_id' => $blacklistMatch->id,
-            'guest_name'   => $guestData['full_name'],
-            'national_id'  => $guestData['national_id'],
-            'branch_id'    => auth()->user()->branch_id,
-            'risk_level'   => $blacklistMatch->risk_level,
-            'details'      => "محاولة تسكين شخص مطلوب أمنياً في " . auth()->user()->branch->name,
-            'read_at'      => null
-        ]);
+        try {
+            $user = auth()->user();
 
-        // توثيق في سجلات النظام العميقة
-        Log::warning("SECURITY ALERT: Blacklisted person detected", [
-            'name' => $guestData['full_name'],
-            'branch' => auth()->user()->branch_id
-        ]);
+            SecurityNotification::create([
+                'blacklist_id' => $blacklistMatch->id,
+                'guest_name'   => $fullName,
+                'national_id'  => $nationalId,
+                'branch_id'    => $user->branch_id ?? null,
+                'risk_level'   => $blacklistMatch->risk_level ?? 'CRITICAL',
+                'details'      => "🛑 محاولة رصد: تم العثور على مطابقة للقائمة السوداء لشخص يحاول التسكين باسم [{$fullName}] ورقم هوية [{$nationalId}]",
+            ]);
+
+            Log::warning("SECURITY_HOT: Blacklisted guest match detected", [
+                'national_id' => $nationalId,
+                'match_type'  => $blacklistMatch->full_security_hash === hash('sha256', mb_strtolower(str_replace(' ', '', $fullName))) ? 'NAME_MATCH' : 'ID_MATCH'
+            ]);
+        } catch (Exception $e) {
+            Log::error("Failed to create security notification: " . $e->getMessage());
+        }
     }
 }

@@ -8,7 +8,6 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany; 
-use Illuminate\Database\Eloquent\Relations\HasOne;
 use Spatie\Activitylog\Traits\LogsActivity;
 use Spatie\Activitylog\LogOptions;
 
@@ -19,33 +18,32 @@ class Guest extends Model
     protected $table = 'guests';
 
     protected $fillable = [
-        'first_name', 
-        'father_name', 
-        'last_name', 
-        'mother_name',
-        'national_id',
-        'id_type',
-        'nationality',
-        'phone',
-        'email',
-        'address',
-        'car_plate', 
-        'national_id_hash',
-        'full_security_hash',
-        'audit_status', 
-        'audited_at', 
-        'audited_by', 
-        'audit_notes',
-        'is_flagged', 
-        'status', // active, blacklisted, suspended
+        'first_name', 'father_name', 'last_name', 'mother_name',
+        'national_id', 'id_type', 'nationality', 'phone', 'email',
+        'address', 'car_plate', 'national_id_hash', 'full_security_hash',
+        'audit_status', 'audited_at', 'audited_by', 'audit_notes',
+        'is_flagged', 'status', 
     ];
 
-    // لضمان ظهور الحقول المحسوبة في JSON عند إرسالها للفرونت إند
-    protected $appends = ['full_name'];
+    /**
+     * 1. تعديل الحقول المخفية:
+     * أضفت العلاقات التي تسبب الدوران (Circular References) هنا
+     */
+    protected $hidden = [
+        'national_id_hash',
+        'full_security_hash',
+        'reservations',      // إخفاء لمنع الدوران
+        'latestReservation', // إخفاء لمنع الدوران
+        'personalDocuments'
+    ];
 
     /**
-     * إعدادات سجل التدقيق (Audit Log)
+     * 2. تحذير بخصوص $appends:
+     * تركت full_name لأنه نصي، لكن أزلت current_stay من هنا 
+     * لأن استدعاءه تلقائياً عند كل طلب هو ما يسبب تعليق السيرفر.
      */
+    protected $appends = ['full_name'];
+
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
@@ -60,69 +58,49 @@ class Guest extends Model
 
     /*
     |--------------------------------------------------------------------------
-    | الوصول (Accessors)
+    | Accessors
     |--------------------------------------------------------------------------
     */
 
-    // دمج الاسم الثلاثي لسهولة العرض في JS
     public function getFullNameAttribute(): string
     {
         return "{$this->first_name} {$this->father_name} {$this->last_name}";
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | النطاقات الأمنية (Scopes)
-    |--------------------------------------------------------------------------
-    */
-
-    public function scopeFlagged($query)
-    {
-        return $query->where('is_flagged', true);
-    }
-
-    public function scopePendingAudit($query)
-    {
-        return $query->where('audit_status', 'new');
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | العلاقات (Relationships)
-    |--------------------------------------------------------------------------
-    */
-
     /**
-     * العلاقة التي سببت الخطأ 500
-     * يجب أن تشير إلى موديل Reservation (وليس GuestReservation إلا إذا كان الملف موجوداً بهذا الاسم)
+     * تم إبقاء الوصول لـ current_stay كدالة يدوية وليس Append تلقائي
      */
+    public function getCurrentStayAttribute()
+    {
+        return $this->latestReservation->first();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Relationships
+    |--------------------------------------------------------------------------
+    */
+
     public function reservations(): BelongsToMany
     {
-        // تم تغيير GuestReservation.class إلى Reservation.class كاسم قياسي
         return $this->belongsToMany(Reservation::class, 'reservation_guest', 'guest_id', 'reservation_id')
-                    ->withPivot(['participant_type', 'vehicle_plate_at_checkin']) 
+                    ->withPivot(['participant_type', 'vehicle_plate_at_checkin', 'registered_by']) 
                     ->withTimestamps();
     }
 
-    /**
-     * علاقة جلب أحدث حجز (المطلوبة في GuestController->index)
-     */
-    public function latestReservation(): HasOne
+    public function latestReservation(): BelongsToMany
     {
-        return $this->hasOne(Reservation::class)->latestOfMany();
+        return $this->belongsToMany(Reservation::class, 'reservation_guest', 'guest_id', 'reservation_id')
+                    ->withPivot(['participant_type', 'vehicle_plate_at_checkin'])
+                    ->latest('reservation_guest.created_at')
+                    ->limit(1);
     }
 
-    /**
-     * المدقق (User) الذي راجع البيانات
-     */
     public function auditor(): BelongsTo
     {
         return $this->belongsTo(User::class, 'audited_by');
     }
 
-    /**
-     * الوثائق الأمنية
-     */
     public function personalDocuments(): HasMany
     {
         return $this->hasMany(GuestDocument::class, 'guest_id');

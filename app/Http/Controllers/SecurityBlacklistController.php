@@ -7,7 +7,8 @@ use App\Models\SecurityNotification;
 use App\Services\SecurityService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\{Gate, Log, Auth};
+use Exception;
 
 class SecurityBlacklistController extends Controller
 {
@@ -20,25 +21,28 @@ class SecurityBlacklistController extends Controller
     }
 
     /**
-     * عرض القائمة السوداء (شاشة الرقابة المركزية)
-     * مسموح فقط للنخبة الأمنية في HQ
+     * عرض القائمة السوداء
+     * تم إضافة Pagination لضمان سرعة الاستجابة في XAMPP
      */
     public function index(): JsonResponse
     {
-        $this->authorize('viewAny', SecurityBlacklist::class);
+        try {
+            $this->authorize('viewAny', SecurityBlacklist::class);
 
-        // جلب البيانات مع إخفاء الهاشات الأصلية لزيادة الأمان
-        $list = SecurityBlacklist::latest()->get();
+            // نستخدم الترقيم (Paginate) لأن القائمة قد تكبر مع الوقت
+            $list = SecurityBlacklist::latest()->paginate(20);
 
-        return response()->json([
-            'status' => 'success',
-            'count'  => $list->count(),
-            'data'   => $list
-        ]);
+            return response()->json([
+                'status' => 'success',
+                'data'   => $list
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'تعذر جلب القائمة الأمنية'], 500);
+        }
     }
 
     /**
-     * إدراج "هدف أمني" جديد في المنظومة
+     * إدراج هدف أمني جديد
      */
     public function store(Request $request): JsonResponse
     {
@@ -49,55 +53,27 @@ class SecurityBlacklistController extends Controller
             'first_name'   => 'required|string',
             'father_name'  => 'required|string',
             'mother_name'  => 'nullable|string',
-            'risk_level'   => 'required|in:CRITICAL,WATCHLIST',
+            'risk_level'   => 'required|in:CRITICAL,WATCHLIST,DANGER,BANNED', // تحديث لتطابق الموديل
             'reason'       => 'nullable|string',
             'instructions' => 'required|string'
         ]);
 
-        // الخدمة ستقوم بتوليد الهاشات الثلاثية (الهوية، الاسم، والأم) صمتاً
-        $record = $this->securityService->addToBlacklist($validated);
+        try {
+            $record = $this->securityService->addToBlacklist($validated);
 
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'تم تعميم البيانات أمنياً على جميع الفروع لحظياً',
-            'data'    => $record
-        ], 201);
-    }
-
-    /**
-     * دالة "الرصد الصادم": فحص يدوي لهوية نزيل
-     */
-    public function check(Request $request): JsonResponse
-    {
-        $this->authorize('check', SecurityBlacklist::class);
-
-        $request->validate(['national_id' => 'required|string']);
-
-        // نستخدم الـ Hash Identity للفحص الصامت دون تخزين الرقم الصريح في الـ Logs
-        $match = $this->securityService->isBlacklisted($request->national_id);
-
-        if ($match) {
             return response()->json([
-                'status'         => 'danger',
-                'is_blacklisted' => true,
-                'message'        => '🛑 تنبيه أمني: الشخص مدرج في قائمة الحظر المركزية',
-                'details'        => [
-                    'risk_level'   => $match->risk_level,
-                    'instructions' => $match->instructions // التعليمات التي أعددتها مسبقاً
-                ]
-            ], 200);
+                'status'  => 'success',
+                'message' => 'تم تعميم البيانات أمنياً على جميع الفروع لحظياً',
+                'data'    => $record
+            ], 201);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'فشل تسجيل القيد الأمني'], 400);
         }
-
-        return response()->json([
-            'status'         => 'success',
-            'is_blacklisted' => false,
-            'message'        => 'لم يتم العثور على قيود أمنية مسجلة.'
-        ]);
     }
 
     /**
      * سجل التنبيهات اللحظية (الرادار)
-     * يظهر هنا من تم رصدهم "فعلياً" داخل الفنادق
+     * تحسين تحميل العلاقات لكسر حلقة الدوران
      */
     public function getNotifications(): JsonResponse
     {
@@ -105,45 +81,49 @@ class SecurityBlacklistController extends Controller
             return response()->json(['message' => 'غير مصرح لك بالدخول لغرفة العمليات'], 403);
         }
 
-        $notifications = SecurityNotification::with(['blacklist', 'guest', 'reservation.room'])
+        try {
+            // تحميل العلاقات مع تحديد الحقول المطلوبة فقط
+            $notifications = SecurityNotification::with([
+                'blacklist:id,risk_level', 
+                'guest:id,first_name,last_name,national_id', 
+                'reservation' => function($q) {
+                    $q->select('id', 'room_id', 'branch_id', 'status');
+                },
+                'reservation.room:id,room_number'
+            ])
             ->latest()
-            ->paginate(20);
+            ->paginate(15);
 
-        return response()->json([
-            'status' => 'success',
-            'data'   => $notifications
-        ]);
+            return response()->json([
+                'status' => 'success',
+                'data'   => $notifications
+            ]);
+        } catch (Exception $e) {
+            Log::error("Security Radar Error: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'فشل تحميل رادار التنبيهات'], 500);
+        }
     }
 
     /**
-     * معالجة التنبيه (تأكيد القراءة/الإجراء)
+     * معالجة التنبيه (تأكيد القراءة)
      */
     public function markAsRead($id): JsonResponse
     {
-        $this->authorize('audit', SecurityBlacklist::class);
+        try {
+            $this->authorize('audit', SecurityBlacklist::class);
 
-        $notification = SecurityNotification::findOrFail($id);
-        $notification->update(['read_at' => now()]);
+            $notification = SecurityNotification::findOrFail($id);
+            $notification->update([
+                'read_at' => now(),
+                'processed_by' => Auth::id() // توثيق من قام بالاستلام
+            ]);
 
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'تم تأكيد استلام التنبيه وتوثيق الإجراء'
-        ]);
-    }
-
-    /**
-     * إلغاء الحظر (صلاحية سيادية للـ HQ Admin فقط)
-     */
-    public function destroy($id): JsonResponse
-    {
-        $record = SecurityBlacklist::findOrFail($id);
-        $this->authorize('delete', $record);
-        
-        $record->delete();
-
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'تم رفع القيد الأمني عن السجل'
-        ]);
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'تم تأكيد استلام التنبيه وتوثيق الإجراء'
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'السجل غير موجود'], 404);
+        }
     }
 }

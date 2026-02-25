@@ -11,7 +11,7 @@ class ReservationPolicy
     use HandlesAuthorization;
 
     /**
-     * الفحص المبدئي: منع أي مستخدم معطل من الوصول للنظام
+     * الفحص المبدئي: حماية النظام من المستخدمين المعطلين
      */
     public function before(User $user, $ability)
     {
@@ -19,23 +19,22 @@ class ReservationPolicy
             return false;
         }
 
-        // المدير العام (HQ Admin) يملك صلاحية تجاوز أي قفل للحالات الطارئة
+        // HQ Admin يملك صلاحية مطلقة (Root Access) للطوارئ
         if ($user->hasRole('hq_admin')) {
             return true;
         }
     }
 
     /**
-     * من يمكنه رؤية قائمة الحجوزات
+     * رؤية القائمة: تشمل المدققين والأمن والموظفين
      */
     public function viewAny(User $user): bool
     {
-        // الجميع يرى القائمة (لكن الـ Scope في الموديل سيحدد لكل فرع بياناته)
         return $user->hasAnyRole(['branch_reception', 'hq_auditor', 'hq_security', 'hq_supervisor']);
     }
 
     /**
-     * من يمكنه رؤية تفاصيل حجز محدد
+     * رؤية حجز محدد: عزل الفروع للموظفين وفتحها للـ HQ
      */
     public function view(User $user, Reservation $reservation): bool
     {
@@ -43,12 +42,12 @@ class ReservationPolicy
             return true;
         }
 
-        // موظف الاستقبال يرى فقط حجوزات فرعه
+        // الموظف يرى فقط بيانات فرعه
         return $user->hasRole('branch_reception') && $user->branch_id === $reservation->branch_id;
     }
 
     /**
-     * إنشاء حجز جديد
+     * إنشاء حجز: حصراً للاستقبال والمشرف
      */
     public function create(User $user): bool
     {
@@ -56,68 +55,62 @@ class ReservationPolicy
     }
 
     /**
-     * تعديل الحجز (النقطة الأمنية الحساسة)
+     * التعديل: تطبيق سياسة القفل (البند 4 من الوثيقة)
      */
     public function update(User $user, Reservation $reservation): bool
     {
-        // 1. إذا كان الحجز مقفلاً أمنياً (Locked):
-        // يمنع موظف الاستقبال تماماً من تغيير (رقم السيارة، رقم الغرفة، أو المرافقين)
-        if ($reservation->is_locked) {
-            return $user->hasAnyRole(['hq_security', 'hq_supervisor']);
+        // 1. إذا كان الحجز مقفلاً (is_locked) أو "تم تدقيقه" (audited)
+        // يُمنع موظف الاستقبال منعاً باتاً من التعديل
+        if ($reservation->is_locked || $reservation->audit_status === 'audited') {
+            return $user->hasAnyRole(['hq_supervisor', 'hq_security']);
         }
 
-        // 2. فصل السلطات: المدقق والأمن للمراقبة فقط وليس لتغيير البيانات اللوجستية
-        if ($user->hasAnyRole(['hq_auditor', 'hq_security'])) {
-            return false;
-        }
-
-        // 3. موظف الاستقبال يعدل فقط في فرعه وإذا لم يكن هناك "قفل"
+        // 2. موظف الاستقبال يعدل فقط في فرعه وإذا لم يتم القفل
         if ($user->hasRole('branch_reception')) {
             return $user->branch_id === $reservation->branch_id;
         }
 
+        // 3. المشرف يملك صلاحية التعديل دائماً (مع تسجيل السبب في السيرفس)
         return $user->hasAnyRole(['hq_supervisor']);
     }
 
     /**
-     * القفل الأمني (Locking):
-     * صلاحية سيادية للـ HQ لمنع التلاعب بالبيانات بعد الاشتباه بنزيل
+     * التدقيق والقفل (Audit & Lock): البند 3 و 4 في الوثيقة
+     * صلاحية سيادية للمشرفين والأمن فقط
      */
-    public function lock(User $user): bool
+    public function audit(User $user): bool
     {
-        return $user->hasAnyRole(['hq_security', 'hq_auditor', 'hq_supervisor']);
+        return $user->hasAnyRole(['hq_supervisor', 'hq_security', 'hq_auditor']);
     }
 
     /**
-     * رؤية الوثائق (صور الهويات)
+     * رؤية الوثائق: الأمن والمدقق فوق القفل، الموظف تحت القفل
      */
     public function viewDocuments(User $user, Reservation $reservation): bool
     {
-        // الأمن والمدقق لديهم صلاحية دائمة لرؤية الهويات
-        if ($user->hasAnyRole(['hq_auditor', 'hq_security'])) {
+        if ($user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor'])) {
             return true;
         }
 
-        // موظف الاستقبال يراها فقط لفرعه بشرط عدم وجود قفل أمني
         return $user->hasRole('branch_reception') 
                && $user->branch_id === $reservation->branch_id 
                && !$reservation->is_locked;
     }
 
     /**
-     * حذف السجل (ممنوع نهائياً للحفاظ على الأرشفة الأمنية)
+     * الحذف: سياسة "لا حذف نهائي" (البند 8)
      */
     public function delete(User $user, Reservation $reservation): bool
     {
-        return false; // المدير العام فقط من دالة before
+        // المنع الافتراضي للجميع، والتعامل مع الأرشفة يتم عبر Soft Delete
+        return false; 
     }
 
     /**
-     * رؤية سجل العمليات (Audit Logs):
-     * لمعرفة من عدل رقم السيارة أو وقت الدخول
+     * سجل التدقيق: حصراً للرقابة المركزية
      */
     public function viewAuditLogs(User $user): bool
     {
-        return $user->hasAnyRole(['hq_auditor', 'hq_security']);
+        return $user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor']);
     }
 }

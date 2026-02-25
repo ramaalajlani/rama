@@ -6,25 +6,34 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
-// استيراد أدوات الرقابة من Spatie
 use Spatie\Activitylog\Traits\LogsActivity;
 use Spatie\Activitylog\LogOptions;
 
 class Branch extends Model
 {
-    // استبدال Observable بـ LogsActivity لتوحيد نظام الرقابة
     use SoftDeletes, HasFactory, LogsActivity;
 
-    protected $fillable = ['name', 'address', 'phone', 'status']; 
+    protected $fillable = ['name', 'address', 'phone', 'status'];
 
     /**
-     * إعدادات سجل النشاط للفروع
+     * الحقول المخفية عند تحويل الموديل إلى JSON.
+     * إضافة هذه الحقول تمنع حدوث الدوران اللانهائي (Circular Reference) 
+     * وتسرع استجابة الـ API بشكل كبير.
+     */
+    protected $hidden = [
+        'users',
+        'rooms',
+        'reservations',
+        'deleted_at'
+    ];
+
+    /**
+     * إعدادات سجل النشاط للفروع (Spatie Activitylog)
      */
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
-            ->logOnly(['name', 'status', 'address', 'phone']) // مراقبة أي تغيير في بيانات الفرع
+            ->logOnly(['name', 'status', 'address', 'phone'])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
             ->useLogName('branch_management')
@@ -36,8 +45,6 @@ class Branch extends Model
      */
     public function users(): HasMany
     {
-        // ملاحظة: حسب الكود السابق في موديل User، العلاقة هي BelongsTo 
-        // لذا هنا نستخدم HasMany للوصول لموظفي الفرع
         return $this->hasMany(User::class);
     }
 

@@ -7,20 +7,17 @@ use Illuminate\Validation\Rule;
 
 class StoreBranchRequest extends FormRequest
 {
-    /**
-     * الصلاحية مفعلة هنا لأننا نتحكم بها بدقة أكبر في الـ Controller عبر الـ Policies
-     */
     public function authorize(): bool
     {
         return true; 
     }
 
     /**
-     * قواعد التحقق لضمان هوية فريدة لكل فرع
+     * قواعد التحقق لضمان هوية فريدة وبيانات دقيقة لكل فرع
      */
     public function rules(): array
     {
-        // جلب معرف الفرع في حال كانت العملية "تحديث" لتجنب تعارض الـ unique مع نفسه
+        // استخراج المعرف بذكاء يدعم Route Model Binding
         $branchId = $this->route('branch') instanceof \App\Models\Branch 
                     ? $this->route('branch')->id 
                     : $this->route('branch');
@@ -30,28 +27,41 @@ class StoreBranchRequest extends FormRequest
                 'required', 
                 'string', 
                 'max:255',
-                // التأكد من عدم تكرار الاسم إلا لنفس السجل عند التحديث
                 Rule::unique('branches', 'name')->ignore($branchId)
             ],
             'address' => ['nullable', 'string', 'max:500'],
-            'phone'   => ['nullable', 'string', 'max:20'],
-            'status'  => ['nullable', Rule::in(['active', 'inactive'])],
+            // تحسين: إضافة regex لضمان أن رقم الهاتف يحتوي على أرقام ورموز اتصال دولية فقط
+            'phone'   => ['nullable', 'string', 'max:20', 'regex:/^([0-9\s\-\+\(\)]*)$/'],
             
-            // إضافة حقول اختيارية قد تحتاجينها في التقارير المركزية
+            // تحديد الحالة الافتراضية 'active' في حال لم يتم إرسالها
+            'status'  => ['required', Rule::in(['active', 'inactive'])],
+            
             'manager_name' => ['nullable', 'string', 'max:100'],
-            'city'         => ['nullable', 'string', 'max:50'],
+            'city'         => ['required', 'string', 'max:50'], // جعل المدينة مطلوبة لأغراض الفلترة الأمنية
         ];
     }
 
     /**
-     * رسائل تنبيهية واضحة لمستخدمي الـ HQ
+     * تهيئة البيانات قبل التحقق (Sanitization)
      */
+    protected function prepareForValidation()
+    {
+        $this->merge([
+            // تنظيف الاسم من المسافات الزائدة لضمان دقة قاعدة الـ unique
+            'name' => trim($this->name),
+            // تعيين حالة افتراضية إذا كان الحقل فارغاً
+            'status' => $this->status ?? 'active',
+        ]);
+    }
+
     public function messages(): array
     {
         return [
             'name.required' => 'يجب إدخال اسم الفرع.',
-            'name.unique'   => 'اسم هذا الفرع مسجل مسبقاً في النظام، يرجى اختيار اسم مميز.',
-            'status.in'     => 'حالة الفرع يجب أن تكون إما نشط (active) أو غير نشط (inactive).',
+            'name.unique'   => 'اسم هذا الفرع مسجل مسبقاً، يرجى استخدام اسم مختلف.',
+            'phone.regex'   => 'صيغة رقم الهاتف غير صحيحة.',
+            'status.required' => 'يجب تحديد حالة الفرع.',
+            'city.required'   => 'يرجى تحديد المدينة التي يتبع لها الفرع.',
         ];
     }
 }

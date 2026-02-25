@@ -1,6 +1,5 @@
 <?php
 
-namespace App\Models; // تأكدي من المسار الصحيح
 namespace App\Policies;
 
 use App\Models\Guest;
@@ -13,20 +12,24 @@ class GuestPolicy
 
     /**
      * الفحص المبدئي (الأولوية القصوى)
+     * يتم استدعاؤها قبل أي دالة أخرى
      */
     public function before(User $user, $ability)
     {
-        // إذا كان المستخدم معطلاً، ترفض أي عملية فوراً
+        // 1. إذا كان المستخدم معطلاً، ترفض أي عملية فوراً مهما كانت صلاحياته
         if (!$this->isUserActive($user)) {
             return false;
         }
 
-        // مدير النظام في HQ له كامل الصلاحيات دائماً
+        // 2. مدير النظام (hq_admin) له كامل الصلاحيات "الجوكر"
         if ($user->hasRole('hq_admin')) {
             return true;
         }
     }
 
+    /**
+     * تحقق داخلي من حالة نشاط الموظف
+     */
     private function isUserActive(User $user): bool
     {
         return !empty($user->status) && strtolower(trim($user->status)) === 'active';
@@ -45,6 +48,10 @@ class GuestPolicy
      */
     public function view(User $user, Guest $guest): bool
     {
+        // ميزة أمنية: موظف الاستقبال يرى فقط النزلاء الذين زاروا فرعه (عزل البيانات)
+        // إذا أردتِ تطبيق هذا القيد الصارم، يمكن تفعيل السطر التالي:
+        // if ($user->hasRole('branch_reception')) { return $guest->reservations()->where('branch_id', $user->branch_id)->exists(); }
+
         return $user->hasAnyRole(['branch_reception', 'hq_auditor', 'hq_security', 'hq_supervisor']);
     }
 
@@ -57,36 +64,35 @@ class GuestPolicy
     }
 
     /**
-     * التعديل على بيانات النزيل (النقطة الأمنية الأهم)
+     * التعديل على بيانات النزيل (منطق الحماية الثلاثي)
      */
     public function update(User $user, Guest $guest): bool
     {
-        // 1. إذا كان النزيل محظوراً أمنياً (Blacklisted)
-        // لا يُسمح للاستقبال بالاقتراب من الملف، الصلاحية فقط للأمن HQ
+        // 1. حماية المحظورين (Blacklist Protection)
+        // لا يُسمح للاستقبال بتعديل ملف شخص محظور؛ الصلاحية للأمن فقط
         if ($guest->status === 'blacklisted') {
             return $user->hasAnyRole(['hq_security']);
         }
 
-        // 2. إذا كان النزيل مرصوداً (Flagged)
-        // التعديل محصور بالمشرفين والأمن فقط
+        // 2. حماية النزلاء المرصودين (Flagged)
+        // إذا وُضع علم على النزيل، التعديل محصور بالمشرفين والأمن
         if ($guest->is_flagged) {
             return $user->hasAnyRole(['hq_security', 'hq_supervisor']);
         }
 
-        // 3. قفل البيانات بعد التدقيق (Audit Protection) - ميزة جديدة
-        // إذا قمتِ في HQ بتدقيق النزيل (Audited)، يُمنع موظف الاستقبال من تغيير بياناته
-        // لمنع تغيير (اسم الأم أو الأب) بعد اعتمادهم أمنياً
+        // 3. قفل البيانات المعتمدة (Audit Lock)
+        // بمجرد أن تصبح الحالة 'audited'، يُمنع الاستقبال من التغيير (لمنع التلاعب بالأسماء أو الهويات)
         if ($guest->audit_status === 'audited' && $user->hasRole('branch_reception')) {
             return false; 
         }
 
-        // 4. الحالات العادية
+        // 4. الصلاحية العامة للتعديل
         return $user->hasAnyRole(['branch_reception', 'hq_supervisor']);
     }
 
     /**
      * تدقيق النزيل (Audit Action)
-     * صلاحية خاصة فقط للمدققين في HQ
+     * تحويل الحالة إلى Audited لقفل السجل
      */
     public function audit(User $user): bool
     {
@@ -94,10 +100,12 @@ class GuestPolicy
     }
 
     /**
-     * الحذف (محظور تماماً إلا للمدير العام)
+     * الحذف (سياسة "لا حذف نهائي" في النظام الأمني)
      */
     public function delete(User $user, Guest $guest): bool
     {
-        return false; // المدير العام مسموح له عبر دالة before
+        // ممنوع الحذف تماماً لأي دور، حتى لو بالخطأ
+        // الاستثناء الوحيد هو hq_admin وتمت معالجته في دالة before
+        return false;
     }
 }

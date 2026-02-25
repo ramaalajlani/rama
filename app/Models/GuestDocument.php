@@ -28,8 +28,18 @@ class GuestDocument extends Model
     ];
 
     /**
+     * 1. الحقول المخفية:
+     * نمنع تحميل بيانات النزيل والحجز بشكل JSON تلقائي داخل الوثيقة
+     * لتجنب الحلقات الدائرية (Infinite Loops) التي تعطل XAMPP.
+     */
+    protected $hidden = [
+        'guest',
+        'reservation',
+        'file_path' // حماية أمنية للمسار الحقيقي على السيرفر
+    ];
+
+    /**
      * إعدادات سجل النشاط للوثائق (Audit Log)
-     * تم تحسين الوصف ليعرض الاسم الكامل للنزيل عند حدوث أي إجراء
      */
     public function getActivitylogOptions(): LogOptions
     {
@@ -45,12 +55,16 @@ class GuestDocument extends Model
             ->dontSubmitEmptyLogs()
             ->useLogName('security_monitor') 
             ->setDescriptionForEvent(function(string $eventName) {
-                // محاولة جلب اسم النزيل للعرض في السجل
-                $name = $this->guest ? 
-                        "{$this->guest->first_name} {$this->guest->father_name} {$this->guest->last_name}" : 
-                        "رقم النزيل: {$this->guest_id}";
+                /**
+                 * 2. تحسين الأداء في السجل:
+                 * استخدام relationLoaded يمنع السيرفر من تنفيذ استعلام SQL جديد 
+                 * في كل مرة يتم فيها تسجيل نشاط، مما يسرع عملية الرفع.
+                 */
+                $guestName = $this->relationLoaded('guest') ? 
+                    "{$this->guest->first_name} {$this->guest->last_name}" : 
+                    "رقم: {$this->guest_id}";
                 
-                return "وثائق أمنية: تم {$eventName} ملف إثبات شخصية للنزيل: {$name} ضمن الحجز رقم: #{$this->reservation_id}";
+                return "وثائق أمنية: تم {$eventName} ملف للنزيل: {$guestName} ضمن الحجز: #{$this->reservation_id}";
             });
     }
 
@@ -60,26 +74,16 @@ class GuestDocument extends Model
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * النزيل صاحب الوثيقة
-     */
     public function guest(): BelongsTo
     {
         return $this->belongsTo(Guest::class, 'guest_id');
     }
 
-    /**
-     * الحجز المرتبط به هذه الوثيقة
-     * تم التعديل ليطابق اسم الموديل Reservation الذي اعتمدناه في الـ Controller والـ Service
-     */
     public function reservation(): BelongsTo
     {
         return $this->belongsTo(Reservation::class, 'reservation_id');
     }
 
-    /**
-     * الموظف الذي قام برفع الملف
-     */
     public function uploader(): BelongsTo
     {
         return $this->belongsTo(User::class, 'uploaded_by');
@@ -91,19 +95,13 @@ class GuestDocument extends Model
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * التحقق من سلامة الملف برمجياً (Security Integrity Check)
-     * تقارن الـ Hash المخزن بالـ Hash الفعلي للملف لمنع التلاعب بالصور في السيرفر
-     */
     public function isIntegrityValid(): bool
     {
-        // استخدام التخزين الخاص (Private) لضمان عدم الوصول للملفات عبر رابط مباشر
-        // تم التأكد من مسار التخزين الصحيح
+        // استخدام التخزين الخاص لضمان الأمان
         if (!Storage::disk('private')->exists($this->file_path)) {
             return false;
         }
 
-        // حساب بصمة الملف الحالية ومقارنتها بالبصمة وقت الرفع
         $currentHash = hash_file('sha256', Storage::disk('private')->path($this->file_path));
         
         return $this->file_hash === $currentHash;

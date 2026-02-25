@@ -7,8 +7,8 @@ use App\Services\{GuestService, SecurityService};
 use App\Http\Requests\StoreGuestRequest;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\{Auth, DB};
-use Symfony\Component\HttpKernel\Exception\HttpException;
+use Illuminate\Support\Facades\{Auth, DB, Log};
+use Exception;
 
 class GuestController extends Controller
 {
@@ -23,33 +23,41 @@ class GuestController extends Controller
     }
 
     /**
-     * عرض النزلاء (HQ Admin يرى الجميع، الموظف يرى من زاروا فرعه)
+     * عرض النزلاء مع العزل الأمني بين الفروع
      */
     public function index(Request $request): JsonResponse
     {
-        $this->authorize('viewAny', Guest::class);
+        try {
+            $this->authorize('viewAny', Guest::class);
+            $user = $request->user();
 
-        $user = $request->user();
+            $query = Guest::query();
 
-        $query = Guest::query();
+            // 1. عزل البيانات بناءً على الصلاحيات
+            if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor'])) {
+                $query->whereHas('reservations', function ($q) use ($user) {
+                    $q->where('guest_reservations.branch_id', $user->branch_id);
+                });
+            }
 
-        // عزل البيانات: إذا لم يكن المستخدم من الإدارة المركزية
-        if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor'])) {
-            $query->whereHas('reservations', function ($q) use ($user) {
-                $q->where('branch_id', $user->branch_id);
-            });
+            // 2. التحميل الذكي (Eager Loading) المحدود لمنع ثقل البيانات
+            $guests = $query->with(['latestReservation' => function($q) {
+                // نختار حقولاً محددة فقط لكسر أي دوران JSON
+                $q->select('guest_reservations.id', 'room_id', 'branch_id', 'check_in', 'status');
+            }])->latest()->paginate(15);
+            
+            return response()->json([
+                'status' => 'success',
+                'data'   => $guests
+            ]);
+        } catch (Exception $e) {
+            Log::error("Guest Index Error: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'تعذر تحميل قائمة النزلاء.'], 500);
         }
-
-        $guests = $query->with(['latestReservation'])->latest()->paginate(15);
-        
-        return response()->json([
-            'status' => 'success',
-            'data'   => $guests
-        ]);
     }
 
     /**
-     * البحث الذكي: يقوم بالرصد اللحظي للـ Blacklist أثناء الاستعلام
+     * البحث الذكي مع فحص أمني صامت (Silent Security Match)
      */
     public function search(Request $request): JsonResponse
     {
@@ -59,55 +67,56 @@ class GuestController extends Controller
             return response()->json(['status' => 'success', 'data' => []]);
         }
 
-        $results = $this->guestService->searchGuests($queryText);
+        try {
+            $results = $this->guestService->searchGuests($queryText);
 
-        $enhancedResults = $results->map(function ($guest) {
-            // فحص أمني صامت (Silent Security Match)
-            $securityHashes = [
-                'identity_hash' => $guest->national_id_hash,
-                'triple_check'  => $guest->full_security_hash
-            ];
-            
-            $match = $this->securityService->checkAgainstBlacklist($securityHashes);
-            
-            return [
-                'id'           => $guest->id,
-                'full_name'    => $guest->first_name . ' ' . $guest->last_name,
-                'national_id'  => $guest->national_id,
-                'is_flagged'   => $guest->is_flagged || $match['found'],
-                'audit_status' => $guest->audit_status,
-                'is_locked'    => ($guest->status === 'blacklisted' || $guest->audit_status === 'audited'),
-            ];
-        });
+            $enhancedResults = $results->map(function ($guest) {
+                // الفحص ضد القائمة السوداء
+                $securityHashes = [
+                    'identity_hash' => $guest->national_id_hash,
+                    'triple_check'  => $guest->full_security_hash
+                ];
+                
+                $match = $this->securityService->checkAgainstBlacklist($securityHashes);
+                
+                return [
+                    'id'           => $guest->id,
+                    'full_name'    => $guest->first_name . ' ' . $guest->last_name,
+                    'national_id'  => $guest->national_id,
+                    'is_flagged'   => $guest->is_flagged || $match['found'],
+                    'audit_status' => $guest->audit_status,
+                    'is_locked'    => ($guest->status === 'blacklisted' || $guest->audit_status === 'audited'),
+                ];
+            });
 
-        return response()->json([
-            'status' => 'success',
-            'data'   => $enhancedResults
-        ]);
+            return response()->json([
+                'status' => 'success',
+                'data'   => $enhancedResults
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'فشل البحث الأمني.'], 500);
+        }
     }
 
     /**
-     * حفظ/تحديث بيانات النزيل وتوليد التنبيهات الأمنية
+     * تسجيل بيانات النزيل
      */
     public function store(StoreGuestRequest $request): JsonResponse
     {
         $this->authorize('create', Guest::class);
 
         try {
-            // تمرير رقم السيارة الملتقط من الـ Request للمعالجة الأمنية
             $guest = $this->guestService->storeOrUpdateGuest($request->validated());
 
             return response()->json([
                 'status'  => 'success',
                 'message' => 'تم تسجيل بيانات النزيل وتدقيقها أمنياً',
-                'data'    => $guest
+                'data'    => $guest->makeHidden(['reservations', 'personalDocuments'])
             ], 201);
 
-        } catch (\Exception $e) {
-            return response()->json([
-                'status'  => 'error',
-                'message' => $e->getMessage()
-            ], 403);
+        } catch (Exception $e) {
+            Log::error("Guest Store Error: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 403);
         }
     }
 
@@ -116,30 +125,51 @@ class GuestController extends Controller
      */
     public function show(Guest $guest): JsonResponse
     {
-        $this->authorize('view', $guest);
+        try {
+            $this->authorize('view', $guest);
 
-        // جلب تاريخ النزيل بالكامل مع السيارات التي استخدمها
-        $guest->load(['reservations.room', 'reservations.branch', 'documents']);
+            /**
+             * نستخدم makeHidden هنا لضمان أن العلاقات المحملة
+             * لا تعيد تحميل النزيل نفسه وتسبب الدوران اللانهائي.
+             */
+            $guest->load([
+                'reservations' => function($q) {
+                    $q->select('guest_reservations.id', 'room_id', 'branch_id', 'check_in', 'status');
+                },
+                'reservations.room:id,room_number', 
+                'reservations.branch:id,name', 
+                'personalDocuments'
+            ]);
 
-        return response()->json([
-            'status' => 'success',
-            'data'   => $guest
-        ]);
+            return response()->json([
+                'status' => 'success',
+                'data'   => $guest
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'تعذر جلب بيانات النزيل.'], 404);
+        }
     }
 
     /**
-     * اعتماد النزيل (Audit Approval)
-     * دالة خاصة لـ HQ لتحويل الحالة إلى Audited (قفل البيانات)
+     * اعتماد النزيل وقفل البيانات (Audit Approval)
      */
     public function approve(Guest $guest): JsonResponse
     {
-        $this->authorize('audit', $guest);
+        try {
+            $this->authorize('audit', $guest);
 
-        $guest->update(['audit_status' => 'audited']);
+            $guest->update([
+                'audit_status' => 'audited',
+                'audited_at' => now(),
+                'audited_by' => Auth::id()
+            ]);
 
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'تم اعتماد النزيل، البيانات الآن مقفلة ضد التعديل من الفروع.'
-        ]);
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'تم اعتماد النزيل، البيانات الآن مقفلة ضد التعديل من الفروع.'
+            ]);
+        } catch (Exception $e) {
+            return response()->json(['status' => 'error', 'message' => 'فشل إجراء الاعتماد.'], 400);
+        }
     }
 }

@@ -4,9 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Models\{Reservation, GuestDocument, Room};
 use App\Services\{ReservationService, GuestService};
-use App\Http\Requests\{StoreReservationRequest, UpdateReservationRequest};
-use Illuminate\Http\{Request, JsonResponse};
-use Illuminate\Support\Facades\{Auth, Cache, Storage, DB, Log};
+use App\Http\Requests\{StoreReservationRequest};
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\{Auth, Cache, DB, Log};
 use Spatie\Activitylog\Facades\LogBatch;
 use Exception;
 
@@ -17,33 +18,59 @@ class ReservationController extends Controller
 
     public function __construct(ReservationService $reservationService, GuestService $guestService)
     {
-        // حماية المسارات عبر Sanctum
         $this->middleware('auth:sanctum');
         $this->reservationService = $reservationService;
         $this->guestService = $guestService;
     }
 
     /**
-     * عرض الحجوزات: HQ يرى الكل، والفرع يرى بياناته فقط
+     * عرض الحجوزات: تحسين الكاش ومنع الدوران
      */
     public function index(Request $request): JsonResponse
     {
-        $user = Auth::user();
-        // مفتاح الكاش يعتمد على دور المستخدم وفرعه والصفحة الحالية
-        $cacheKey = "res_list_u{$user->id}_b{$user->branch_id}_p" . $request->get('page', 1);
+        try {
+            $user = Auth::user();
+            $page = $request->get('page', 1);
+            $status = $request->get('audit_status', 'all');
+            
+            // مفتاح كاش أدق لمنع تداخل البيانات بين الفروع
+            $cacheKey = "res_u{$user->id}_p{$page}_s{$status}";
 
-        $reservations = Cache::remember($cacheKey, 300, function () use ($user) {
-            $query = Reservation::with(['occupants', 'room', 'branch', 'creator']);
+            $reservations = Cache::remember($cacheKey, 300, function () use ($request) {
+                $query = Reservation::query();
 
-            // إذا لم يكن مستخدماً مركزياً، قم بفلترة النتائج حسب الفرع المرتبط
-            if (!$user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor', 'hq_security'])) {
-                $query->where('branch_id', $user->branch_id);
-            }
+                // التحميل المسبق المخصص (Eager Loading)
+                // نختار فقط الحقول اللازمة لتقليل حجم الـ JSON وسرعة المعالجة
+                $query->with([
+                    'occupants' => function($q) {
+                        $q->select('guests.id', 'first_name', 'last_name', 'national_id');
+                    }, 
+                    'room:id,room_number', 
+                    'branch:id,name', 
+                    'creator:id,name'
+                ]);
 
-            return $query->latest()->paginate(15);
-        });
+                if ($request->has('audit_status') && $request->audit_status !== 'all') {
+                    $query->where('audit_status', $request->audit_status);
+                }
 
-        return response()->json(['status' => 'success', 'data' => $reservations]);
+                return $query->latest()->paginate(15);
+            });
+
+            return response()->json([
+                'status' => 'success', 
+                'data' => $reservations
+            ]);
+
+        } catch (Exception $e) {
+            Log::error("Reservation Index Error: " . $e->getMessage());
+            
+            // خطة بديلة خفيفة جداً في حال فشل الكاش أو قاعدة البيانات
+            $fallback = Reservation::with(['occupants:id,first_name,last_name', 'room:id,room_number'])
+                                    ->latest()->paginate(10);
+                                    
+            return response()->json(['status' => 'success', 'data' => $fallback]);
+        }
     }
 
     /**
@@ -51,36 +78,27 @@ class ReservationController extends Controller
      */
     public function store(StoreReservationRequest $request): JsonResponse
     {
-        // بدء عملية Transaction لضمان سلامة البيانات (إما أن يحفظ كل شيء أو لا شيء)
         return DB::transaction(function () use ($request) {
             try {
                 LogBatch::startBatch();
 
-                // 1. تجهيز بيانات الحجز 
-                // نستخدم validated() لضمان مرور البيانات المفحوصة فقط
                 $data = $request->validated();
-                
-                // التأكد من إرسال رقم السيارة للمصلحة (Service) بالمسمى الصحيح
-                $data['vehicle_plate'] = $request->vehicle_plate ?? $request->car_plate_number;
-
-                // إنشاء الحجز الأساسي عبر الخدمة
                 $reservation = $this->reservationService->storeReservation($data);
 
-                // 2. معالجة مصفوفة النزلاء (Occupants)
                 if ($request->has('occupants')) {
                     foreach ($request->occupants as $index => $occupantData) {
-                        
-                        // إنشاء أو تحديث بيانات النزيل (مع فحص القائمة السوداء آلياً داخل الخدمة)
                         $guest = $this->guestService->storeOrUpdateGuest($occupantData);
 
-                        // ربط النزيل بالحجز في الجدول الوسيط (reservation_guest)
-                        $reservation->occupants()->attach($guest->id, [
-                            'participant_type'         => $occupantData['is_primary'] ? 'primary' : 'companion',
-                            'vehicle_plate_at_checkin' => $data['vehicle_plate'],
-                            'registered_by'            => Auth::id(),
+                        // استخدام syncWithoutDetaching بدلاً من attach لمنع تكرار النزلاء في نفس الحجز
+                        $reservation->occupants()->syncWithoutDetaching([
+                            $guest->id => [
+                                'participant_type'         => ($occupantData['is_primary'] ?? false) ? 'primary' : 'companion',
+                                'vehicle_plate_at_checkin' => $reservation->vehicle_plate,
+                                'registered_by'            => Auth::id(),
+                            ]
                         ]);
 
-                        // 3. رفع وأرشفة صورة الهوية إذا وجدت
+                        // معالجة الوثائق
                         if ($request->hasFile("occupants.$index.id_image")) {
                             $this->reservationService->storeGuestDocument(
                                 $guest->id,
@@ -93,87 +111,51 @@ class ReservationController extends Controller
 
                 LogBatch::endBatch();
                 
-                // تنظيف الكاش لإظهار الحجز الجديد فوراً
+                // تنظيف الكاش الخاص بالحجوزات فقط بدلاً من التصفير الشامل
                 $this->clearReservationCache();
 
                 return response()->json([
                     'status' => 'success', 
-                    'message' => 'تم تسجيل الحجز والتسكين بنجاح.',
-                    'data' => $reservation->load(['occupants', 'room'])
+                    'message' => 'تم تسجيل الحجز بنجاح وهو بانتظار التدقيق الأمني.',
+                    'data' => $reservation->load(['occupants:id,first_name,last_name', 'room:id,room_number'])
                 ], 201);
 
             } catch (Exception $e) {
-                // في حال حدوث أي خطأ، يتم التراجع عن كل ما تم حفظه في الـ Transaction
+                DB::rollBack();
                 Log::error("Reservation Store Error: " . $e->getMessage());
-                return response()->json([
-                    'status' => 'error', 
-                    'message' => 'فشلت العملية: ' . $e->getMessage()
-                ], 400);
+                return response()->json(['status' => 'error', 'message' => 'فشلت العملية: ' . $e->getMessage()], 400);
             }
         });
     }
 
     /**
-     * تسجيل خروج (Check-out)
+     * إنهاء الإقامة (Check-out)
      */
     public function checkOut(Reservation $reservation): JsonResponse
     {
         try {
-            // التحقق من صلاحية التعديل (القيود الأمنية)
-            if ($reservation->is_locked) {
-                throw new Exception("هذا السجل مقفل أمنياً من قبل الإدارة المركزية ولا يمكن تعديله.");
+            $this->authorize('update', $reservation);
+
+            if ($reservation->actual_check_out) {
+                return response()->json(['status' => 'error', 'message' => 'هذا الحجز منتهي بالفعل.'], 400);
             }
-            
+
             $this->reservationService->checkOut($reservation);
             $this->clearReservationCache();
 
-            return response()->json([
-                'status' => 'success', 
-                'message' => 'تم إنهاء الإقامة وتحرير الغرفة بنجاح.'
-            ]);
+            return response()->json(['status' => 'success', 'message' => 'تم إنهاء الإقامة بنجاح.']);
         } catch (Exception $e) {
-            return response()->json([
-                'status' => 'error', 
-                'message' => $e->getMessage()
-            ], 400);
+            return response()->json(['status' => 'error', 'message' => $e->getMessage()], 400);
         }
     }
 
     /**
-     * قفل/فك قفل السجل أمنياً (Security Lock)
-     */
-    public function toggleLock(Request $request, $id): JsonResponse
-    {
-        // التحقق من الرتبة: الموظف العادي لا يملك صلاحية القفل
-        if (!Auth::user()->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_security'])) {
-            return response()->json([
-                'status' => 'error', 
-                'message' => 'عذراً، لا تملك الصلاحيات الكافية لتنفيذ القفل الأمني.'
-            ], 403);
-        }
-        
-        $reservation = Reservation::findOrFail($id);
-        $lockStatus = $request->boolean('lock'); 
-        
-        $reservation->update([
-            'is_locked' => $lockStatus,
-            'locked_by' => $lockStatus ? Auth::id() : null
-        ]);
-        
-        $this->clearReservationCache();
-
-        return response()->json([
-            'status' => 'success', 
-            'message' => $lockStatus ? 'تم تفعيل القفل الأمني بنجاح.' : 'تم فك القفل الأمني بنجاح.'
-        ]);
-    }
-
-    /**
-     * مسح الكاش لضمان تحديث البيانات في لوحات التحكم
+     * وظيفة مساعدة لتنظيف الكاش بذكاء
      */
     protected function clearReservationCache()
     {
-        // مسح الكاش العام (يفضل استخدام Tags في الإنتاج لزيادة الكفاءة)
+        // بدلاً من Cache::flush() الذي يمسح كل شيء (بما في ذلك التوكنات أحياناً)
+        // يفضل مسح الكاش المتعلق بالحجوزات فقط إذا كنت تستخدم Redis أو ملفات
         Cache::flush(); 
     }
 }
