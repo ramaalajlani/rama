@@ -1,4 +1,5 @@
 <?php
+// app/Services/BranchService.php
 
 namespace App\Services;
 
@@ -7,55 +8,43 @@ use Illuminate\Support\Facades\DB;
 
 class BranchService
 {
-    /**
-     * جلب الفروع مع إحصائيات أمنية وتشغيلية كاملة للـ HQ
-     */
-    public function getAllBranchesWithStats()
+    public function getAllBranchesWithStats(int $perPage = 20, bool $onlyActive = false)
     {
-        return Branch::withCount([
-            'rooms', 
-            // إحصائية الغرف المسكونة حالياً
-            'rooms as occupied_rooms_count' => function ($query) {
-                $query->where('status', 'occupied');
-            },
-            // إحصائية الغرف التي تحت الصيانة (أمنية أو فنية)
-            'rooms as maintenance_rooms_count' => function ($query) {
-                $query->where('status', 'maintenance');
-            }
-        ])
-        // حساب عدد الحجوزات النشطة في هذا الفرع الآن
-        ->withCount(['reservations as active_reservations' => function ($query) {
-            $query->where('status', 'confirmed')
-                  ->whereDate('check_in', '<=', now())
-                  ->whereDate('check_out', '>=', now());
-        }])
-        ->latest()
-        ->get();
+        $q = Branch::query()
+            ->select(['id', 'name', 'city', 'manager_name', 'address', 'phone', 'status', 'created_at'])
+            ->withCount([
+                'rooms',
+                'rooms as occupied_rooms_count' => fn($qq) => $qq->where('status', 'occupied'),
+                'rooms as maintenance_rooms_count' => fn($qq) => $qq->where('status', 'maintenance'),
+                'reservations as active_reservations' => function ($qq) {
+                    $qq->where('status', 'confirmed')
+                       ->whereDate('check_in', '<=', now())
+                       ->whereDate('check_out', '>=', now())
+                       ->whereNull('actual_check_out');
+                },
+            ])
+            ->latest('id');
+
+        if ($onlyActive) {
+            $q->where('status', 'active');
+        }
+
+        return $q->paginate($perPage);
     }
 
-    /**
-     * إنشاء فرع جديد
-     */
-    public function createBranch(array $data)
+    public function createBranch(array $data): Branch
     {
-        return DB::transaction(function () use ($data) {
-            return Branch::create($data);
-        });
+        return DB::transaction(fn() => Branch::create($data));
     }
 
-    /**
-     * تحديث بيانات الفرع
-     */
-    public function updateBranch(Branch $branch, array $data)
+    public function updateBranch(Branch $branch, array $data): bool
     {
         return $branch->update($data);
     }
 
-    /**
-     * جلب تقرير سريع لفرع محدد (للمدققين)
-     */
-    public function getBranchDetails(Branch $branch)
+    public function getBranchDetails(Branch $branch): Branch
     {
-        return $branch->load(['rooms', 'creator']);
+        // ✅ شلت creator لأنه غير موجود بالموديل
+        return $branch->load(['rooms']);
     }
 }

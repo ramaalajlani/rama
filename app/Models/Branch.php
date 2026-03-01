@@ -1,4 +1,5 @@
 <?php
+// app/Models/Branch.php
 
 namespace App\Models;
 
@@ -13,54 +14,61 @@ class Branch extends Model
 {
     use SoftDeletes, HasFactory, LogsActivity;
 
-    protected $fillable = ['name', 'address', 'phone', 'status'];
+    protected $table = 'branches';
 
-    /**
-     * الحقول المخفية عند تحويل الموديل إلى JSON.
-     * إضافة هذه الحقول تمنع حدوث الدوران اللانهائي (Circular Reference) 
-     * وتسرع استجابة الـ API بشكل كبير.
-     */
-    protected $hidden = [
-        'users',
-        'rooms',
-        'reservations',
-        'deleted_at'
+    protected $fillable = [
+        'name',
+        'address',
+        'phone',
+        'city',
+        'manager_name',
+        'status',
     ];
 
-    /**
-     * إعدادات سجل النشاط للفروع (Spatie Activitylog)
-     */
+    protected $hidden = ['deleted_at'];
+
+    protected $casts = [
+        'id'     => 'integer',
+        'status' => 'string',
+    ];
+
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
-            ->logOnly(['name', 'status', 'address', 'phone'])
+            ->useLogName('branch_management')
+            ->logOnly(['name', 'status', 'address', 'phone', 'city', 'manager_name'])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
-            ->useLogName('branch_management')
-            ->setDescriptionForEvent(fn(string $eventName) => "تمت عملية {$eventName} على الفرع: {$this->name}");
+            ->setDescriptionForEvent(function (string $eventName) {
+                return match ($eventName) {
+                    'created'  => "تم إنشاء الفرع: {$this->name}",
+                    'updated'  => "تم تعديل بيانات الفرع: {$this->name}",
+                    'deleted'  => "تم تعطيل الفرع (حذف منطقي): {$this->name}",
+                    'restored' => "تم استرجاع الفرع: {$this->name}",
+                    default    => "تم تنفيذ إجراء على الفرع: {$this->name}",
+                };
+            });
     }
 
-    /**
-     * الموظفون المرتبطون بهذا الفرع
-     */
+    // Relationships
     public function users(): HasMany
     {
-        return $this->hasMany(User::class);
+        return $this->hasMany(User::class, 'branch_id');
     }
 
-    /**
-     * الغرف التابعة لهذا الفرع
-     */
     public function rooms(): HasMany
     {
-        return $this->hasMany(Room::class);
+        return $this->hasMany(Room::class, 'branch_id');
     }
 
-    /**
-     * الحجوزات التابعة لهذا الفرع
-     */
     public function reservations(): HasMany
     {
-        return $this->hasMany(Reservation::class);
+        return $this->hasMany(Reservation::class, 'branch_id');
+    }
+
+    // Scopes
+    public function scopeActive($query)
+    {
+        return $query->where('status', 'active');
     }
 }

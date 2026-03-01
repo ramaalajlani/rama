@@ -10,22 +10,28 @@ return new class extends Migration
     {
         Schema::create('rooms', function (Blueprint $table) {
             $table->id();
-            // الربط بالفرع
-            $table->foreignId('branch_id')->constrained()->onDelete('cascade');
-            
-            $table->string('room_number'); // رقم الغرفة (مثلاً 101)
-            $table->integer('floor_number'); // رقم الطابق (مثلاً 1)
-            $table->string('type'); // نوع الغرفة (فردي، زوجي، جناح)
 
-            // الحالات التشغيلية
+            $table->foreignId('branch_id')
+                  ->constrained('branches')
+                  ->cascadeOnDelete();
+
+            $table->string('room_number');
+            $table->integer('floor_number');
+            $table->string('type');
+
             $table->enum('status', ['available', 'occupied', 'maintenance'])->default('available');
-            
-            $table->text('description')->nullable(); 
-            $table->softDeletes(); 
+
+            $table->text('description')->nullable();
+
+            $table->softDeletes();
             $table->timestamps();
 
-  
             $table->unique(['branch_id', 'floor_number', 'room_number']);
+
+            // Indexing (performance)
+            $table->index(['branch_id', 'status']);
+            $table->index(['branch_id', 'type']);
+            $table->index(['branch_id', 'deleted_at']);
         });
     }
 

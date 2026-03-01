@@ -2,136 +2,170 @@
 
 namespace App\Services;
 
-use App\Models\SecurityBlacklist;
-use App\Models\SecurityNotification;
-use Illuminate\Support\Facades\{Log, DB};
+use App\Models\{SecurityBlacklist, SecurityNotification, Guest, Reservation};
+use Illuminate\Support\Facades\{Auth, DB, Gate};
 use Illuminate\Support\Str;
+use RuntimeException;
 
 class SecurityService
 {
-    /**
-     * تشفير البيانات الحساسة (SHA-256 مع Salt ونظام تطبيع لغوي)
-     * تم تحسينه لمعالجة خصائص اللغة العربية لضمان عدم إفلات المشتبه بهم
-     */
-    public function generateHash(?string $value): ?string
+    private function normalize(?string $value): string
     {
-        if (empty($value)) return null;
+        $v = trim((string)$value);
 
-        // 1. تنظيف أولي وإزالة المسافات
-        $cleanValue = trim($value);
-        $cleanValue = str_replace(' ', '', $cleanValue);
+        // بدل حذف كل المسافات: وحّدها ثم احذفها فقط لو بدك تطابق “مشدد”
+        // حالياً نخليها بدون مسافات لثبات الهاش
+        $v = preg_replace('/\s+/u', ' ', $v ?? '');
+        $v = str_replace(' ', '', $v);
 
-        // 2. تطبيع النصوص العربية (Arabic Normalization)
-        // هذا الجزء يضمن أن "أحمد" و "احمد" ينتجان نفس الهاش
-        $search  = ['أ', 'إ', 'آ', 'ة', 'ى', 'ؤ', 'ئ', 'ء'];
-        $replace = ['ا', 'ا', 'ا', 'ه', 'ي', 'و', 'ي', ''];
-        $cleanValue = str_replace($search, $replace, $cleanValue);
-        
-        // 3. تحويل للأحرف الصغيرة للبيانات اللاتينية
-        $cleanValue = Str::lower($cleanValue);
-        
-        // 4. استخدام مفتاح التطبيق كـ Salt لمنع هجمات التخمين
-        $salt = config('app.key'); 
-        
-        return hash('sha256', $cleanValue . $salt);
+        $search  = ['أ','إ','آ','ة','ى','ؤ','ئ','ء'];
+        $replace = ['ا','ا','ا','ه','ي','و','ي',''];
+        $v = str_replace($search, $replace, $v);
+
+        return Str::lower($v);
+    }
+
+    private function hash(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') return null;
+
+        // app.key فيه prefix base64:... أحياناً، لكنه ثابت -> OK كسالت
+        $salt = (string) config('app.key');
+        return hash('sha256', $this->normalize($value) . $salt);
     }
 
     /**
-     * توليد مصفوفة الهاشات الأمنية (التشفير المتعدد)
+     * يبني كل الهاشات اللازمة لتعبئة security_blacklists
+     * ويعطيك مفاتيح بأسماء الأعمدة مباشرة.
      */
-    public function generateSecurityHashes(array $data): array
+    public function buildHashes(array $data): array
     {
-        $firstName  = $data['first_name'] ?? '';
-        $fatherName = $data['father_name'] ?? '';
-        $lastName   = $data['last_name'] ?? '';
-        $motherName = $data['mother_name'] ?? '';
+        $fn  = (string)($data['first_name'] ?? '');
+        $fa  = (string)($data['father_name'] ?? '');
+        $ln  = (string)($data['last_name'] ?? '');
+        $mn  = (string)($data['mother_name'] ?? '');
+        $nid = (string)($data['national_id'] ?? '');
 
         return [
-            // هاش الهوية: المعيار القطعي الأول
-            'identity_hash'   => $this->generateHash($data['national_id'] ?? ''),
+            // DB columns:
+            'identity_hash'      => $this->hash($nid),
+            'full_name_hash'     => $this->hash($fn . $ln),     // first+last
+            'father_name_hash'   => $this->hash($fa),
+            'mother_name_hash'   => $this->hash($mn),
 
-            // هاش الاسم الرباعي: الاسم + الأب + الكنية
-            'full_name_hash'  => $this->generateHash($firstName . $fatherName . $lastName),
+            // “triple check” = first + father + mother (حسب تصميمك)
+            'triple_check_hash'  => $this->hash($fn . $fa . $mn),
 
-            // البصمة الثلاثية: (الاسم + الأب + الأم) - معيار أمني عالي الدقة (البند 5)
-            'triple_check'    => $this->generateHash($firstName . $fatherName . $motherName),
-
-            // البصمة الشاملة: (الكل مدمج)
-            'full_hash'       => $this->generateHash($firstName . $fatherName . $lastName . $motherName),
+            // full hash = first + father + last + mother
+            'full_hash'          => $this->hash($fn . $fa . $ln . $mn),
         ];
     }
 
     /**
-     * الفحص الأمني المتقاطع (Silent Cross-Check)
+     * إضافة سجل للقائمة السوداء (HQ)
+     * - يعتمد على identity_hash unique لمنع التكرار
+     * - يكتب بقية الهاشات للفهرسة والمطابقة
      */
-    public function checkAgainstBlacklist(array $hashes): array
+    public function addToBlacklist(array $payload): SecurityBlacklist
     {
-        // البحث بالترتيب المنطقي للأهمية
-        $match = SecurityBlacklist::where('is_active', true)
-            ->where(function ($query) use ($hashes) {
-                $query->where('identity_hash', $hashes['identity_hash'])
-                      ->orWhere('triple_check_hash', $hashes['triple_check'])
-                      ->orWhere('full_hash', $hashes['full_hash']);
+        // enforce policy
+        Gate::authorize('create', SecurityBlacklist::class);
+
+        $hashes = $this->buildHashes($payload);
+
+        if (empty($hashes['identity_hash'])) {
+            throw new RuntimeException('تعذر توليد بصمة الهوية.');
+        }
+
+        return DB::transaction(function () use ($payload, $hashes) {
+
+            // إذا موجود مسبقاً حسب identity_hash: رجّعه بدل error
+            $existing = SecurityBlacklist::query()
+                ->where('identity_hash', $hashes['identity_hash'])
+                ->first();
+
+            if ($existing) {
+                // optionally update risk_level/reason/instructions
+                $existing->update([
+                    'risk_level'    => $payload['risk_level'] ?? $existing->risk_level,
+                    'reason'        => $payload['reason'] ?? $existing->reason,
+                    'instructions'  => $payload['instructions'] ?? $existing->instructions,
+                    'is_active'     => true,
+                ]);
+
+                return $existing->fresh();
+            }
+
+            return SecurityBlacklist::create([
+                'identity_hash'      => $hashes['identity_hash'],
+                'full_name_hash'     => $hashes['full_name_hash'],
+                'father_name_hash'   => $hashes['father_name_hash'],
+                'mother_name_hash'   => $hashes['mother_name_hash'],
+                'triple_check_hash'  => $hashes['triple_check_hash'],
+                'full_hash'          => $hashes['full_hash'],
+
+                'risk_level'         => $payload['risk_level'] ?? 'WATCHLIST',
+                'reason'             => $payload['reason'] ?? null,
+                'instructions'       => $payload['instructions'] ?? null,
+
+                'created_by'         => Auth::id(),
+                'is_active'          => true,
+            ]);
+        });
+    }
+
+    /**
+     * فحص صامت ضد blacklist
+     * - ينشئ Notification مرة واحدة فقط
+     * - لا يرجع أي تفاصيل حساسة
+     */
+    public function checkGuestAgainstBlacklist(Guest $guest, Reservation $reservation): array
+    {
+        Gate::authorize('check', SecurityBlacklist::class);
+
+        $hashes = $this->buildHashes([
+            'first_name'  => $guest->first_name,
+            'father_name' => $guest->father_name,
+            'last_name'   => $guest->last_name,
+            'mother_name' => $guest->mother_name,
+            'national_id' => $guest->national_id,
+        ]);
+
+        $match = SecurityBlacklist::query()
+            ->where('is_active', true)
+            ->where(function ($q) use ($hashes) {
+                $q->where('identity_hash', $hashes['identity_hash'])
+                  ->orWhere('triple_check_hash', $hashes['triple_check_hash'])
+                  ->orWhere('full_hash', $hashes['full_hash']);
             })
             ->first();
 
-        return [
-            'found'           => (bool)$match,
-            'blacklist_entry' => $match
-        ];
-    }
+        if (!$match) {
+            return ['found' => false];
+        }
 
-    /**
-     * تسجيل التنبيه في رادار HQ (رصد الموقع اللوجستي)
-     */
-    public function createSecurityAlert($match, $guest, $carPlate = 'N/A')
-    {
-        try {
-            $user = auth()->user();
-            
-            // جلب تفاصيل الموقع الحالي للنزيل
-            $reservation = $guest->reservations()->latest()->first();
-            $locationInfo = ($reservation && $reservation->room) 
-                ? "الغرفة: {$reservation->room->room_number} | الفرع: {$user->branch->name}" 
-                : "في صالة الاستقبال";
+        $existing = SecurityNotification::query()
+            ->where('guest_id', $guest->id)
+            ->where('reservation_id', $reservation->id)
+            ->where('blacklist_id', $match->id)
+            ->exists();
 
-            // إنشاء بلاغ أمني صامت يظهر فوراً في لوحة HQ
-            return SecurityNotification::create([
+        if (!$existing) {
+            $u = auth()->user();
+
+            SecurityNotification::create([
                 'blacklist_id'       => $match->id,
                 'guest_id'           => $guest->id,
-                'branch_id'          => $user->branch_id ?? null,
-                'risk_level'         => $match->risk_level,
-                'car_plate_captured' => $carPlate,
-                'alert_message'      => "⚠️ تطابق أمني حرج - الموقع: {$locationInfo}",
-                'instructions'       => $match->instructions ?? 'يرجى الهدوء وقفل الملف وإبلاغ العمليات فوراً.',
-                'status'             => 'unread'
+                'reservation_id'     => $reservation->id,
+                'branch_name'        => $u->branch?->name ?? 'HQ',
+                'receptionist_name'  => $u->name,
+                'car_plate_captured' => $reservation->vehicle_plate,
+                'risk_level'         => $match->risk_level ?? 'WATCHLIST',
+                'alert_message'      => 'تنبيه أمني: تم رصد تطابق يحتاج مراجعة مركزية.',
+                'instructions'       => $match->instructions,
             ]);
-
-        } catch (\Exception $e) {
-            Log::error("SECURITY_ALERT_ERROR: " . $e->getMessage());
-            return null;
         }
-    }
 
-    /**
-     * إضافة هدف جديد للقائمة السوداء (HQ ONLY)
-     */
-    public function addToBlacklist(array $data)
-    {
-        $hashes = $this->generateSecurityHashes($data);
-
-        return DB::transaction(function () use ($hashes, $data) {
-            return SecurityBlacklist::create([
-                'identity_hash'     => $hashes['identity_hash'],
-                'full_name_hash'    => $hashes['full_name_hash'],
-                'triple_check_hash' => $hashes['triple_check'],
-                'full_hash'         => $hashes['full_hash'],
-                'risk_level'        => $data['risk_level'] ?? 'CRITICAL',
-                'reason'            => $data['reason'] ?? 'إدراج أمني مركزي',
-                'instructions'      => $data['instructions'] ?? 'تنبيه: مطلوب مراجعة الفرع فوراً.',
-                'is_active'         => true,
-                'created_by'        => auth()->id(),
-            ]);
-        });
+        return ['found' => true];
     }
 }

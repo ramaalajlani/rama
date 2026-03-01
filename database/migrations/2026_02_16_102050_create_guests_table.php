@@ -10,41 +10,47 @@ return new class extends Migration
     {
         Schema::create('guests', function (Blueprint $table) {
             $table->id();
-            
-            // 1. البيانات التعريفية المفصلة (Normalized Identity)
-            $table->string('first_name');    // الاسم الأول
-            $table->string('father_name');   // اسم الأب (منفصل)
-     
-            $table->string('last_name');     // اللقب / العائلة
-            $table->string('mother_name');   // اسم الأم (منفصل)
-            
+
+            // Identity (normalized)
+            $table->string('first_name');
+            $table->string('father_name');
+            $table->string('last_name');
+            $table->string('mother_name');
+
             $table->string('national_id')->unique();
-            $table->string('id_type'); // national_id, passport, residency
+            $table->string('id_type');
             $table->string('nationality');
-            $table->string('car_plate')->nullable(); // رقم السيارة
+            $table->string('car_plate')->nullable();
 
-            // 2. الطبقة الأمنية المشفرة (Hashing Layer)
-            // نستخدم الهاش للمطابقة السريعة مع البلاك ليست دون كشف البيانات
-            $table->string('national_id_hash')->index(); 
-            // هاش مدمج (الاسم + الأب + الأم) للمطابقة الثلاثية الصارمة
-            $table->string('full_security_hash')->index(); 
+            // Hashing layer (SHA-256 hex => 64 chars)
+            $table->char('national_id_hash', 64)->index();
+            $table->char('full_security_hash', 64)->index();
 
-            // 3. نظام التدقيق والرصد (Audit System - HQ)
-            // 'new': جديد، 'audited': تم التدقيق من HQ، 'flagged': عليه ملاحظة أمنية
+            // Audit / HQ
             $table->enum('audit_status', ['new', 'audited', 'flagged'])->default('new')->index();
             $table->timestamp('audited_at')->nullable();
-            $table->foreignId('audited_by')->nullable()->constrained('users');
-            $table->text('audit_notes')->nullable(); // ملاحظات المدقق الأمني
 
-            // 4. الرصد الصامت والحالة العامة
-            $table->boolean('is_flagged')->default(false); 
-            $table->string('status')->default('active'); // active, blacklisted, suspended
-            
-            // 5. التواصل والأرشفة
+            $table->foreignId('audited_by')->nullable()
+                ->constrained('users')
+                ->nullOnDelete();
+
+            $table->text('audit_notes')->nullable();
+
+            // Flags & status
+            $table->boolean('is_flagged')->default(false);
+            $table->string('status')->default('active');
+
+            // Contact
             $table->string('phone');
             $table->string('email')->nullable();
-            $table->softDeletes(); 
+
+            $table->softDeletes();
             $table->timestamps();
+
+            // Indexing (performance)
+            $table->index(['audit_status', 'is_flagged']);
+            $table->index(['status', 'deleted_at']);
+            $table->index(['audited_by', 'audited_at']);
         });
     }
 

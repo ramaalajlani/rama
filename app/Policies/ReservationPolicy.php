@@ -10,107 +10,86 @@ class ReservationPolicy
 {
     use HandlesAuthorization;
 
-    /**
-     * الفحص المبدئي: حماية النظام من المستخدمين المعطلين
-     */
-    public function before(User $user, $ability)
+    public function before(User $user, string $ability): ?bool
     {
-        if ($user->status !== 'active') {
+        // أي مستخدم غير active ممنوع كل شيء
+        if (($user->status ?? '') !== 'active') {
             return false;
         }
 
-        // HQ Admin يملك صلاحية مطلقة (Root Access) للطوارئ
-        if ($user->hasRole('hq_admin')) {
-            return true;
-        }
+        // إذا عندك hq_admin وبدك يكون جوكر للنظام:
+        // if ($user->hasRole('hq_admin')) return true;
+
+        return null;
     }
 
-    /**
-     * رؤية القائمة: تشمل المدققين والأمن والموظفين
-     */
     public function viewAny(User $user): bool
     {
-        return $user->hasAnyRole(['branch_reception', 'hq_auditor', 'hq_security', 'hq_supervisor']);
+        // ✅ أضفت hq_security لأنه منطقي يشوف الإقامات عند وجود تنبيه
+        return $user->hasAnyRole(['branch_reception', 'hq_supervisor', 'hq_auditor', 'hq_security']);
     }
 
-    /**
-     * رؤية حجز محدد: عزل الفروع للموظفين وفتحها للـ HQ
-     */
     public function view(User $user, Reservation $reservation): bool
     {
-        if ($user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor'])) {
+        if ($user->hasAnyRole(['hq_supervisor', 'hq_auditor', 'hq_security'])) {
             return true;
         }
 
-        // الموظف يرى فقط بيانات فرعه
-        return $user->hasRole('branch_reception') && $user->branch_id === $reservation->branch_id;
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$reservation->branch_id;
     }
 
-    /**
-     * إنشاء حجز: حصراً للاستقبال والمشرف
-     */
     public function create(User $user): bool
     {
         return $user->hasAnyRole(['branch_reception', 'hq_supervisor']);
     }
 
-    /**
-     * التعديل: تطبيق سياسة القفل (البند 4 من الوثيقة)
-     */
     public function update(User $user, Reservation $reservation): bool
     {
-        // 1. إذا كان الحجز مقفلاً (is_locked) أو "تم تدقيقه" (audited)
-        // يُمنع موظف الاستقبال منعاً باتاً من التعديل
-        if ($reservation->is_locked || $reservation->audit_status === 'audited') {
-            return $user->hasAnyRole(['hq_supervisor', 'hq_security']);
+        // بعد القفل/التدقيق: فقط supervisor
+        if ((bool)$reservation->is_locked || ($reservation->audit_status ?? '') === 'audited') {
+            return $user->hasRole('hq_supervisor');
         }
 
-        // 2. موظف الاستقبال يعدل فقط في فرعه وإذا لم يتم القفل
-        if ($user->hasRole('branch_reception')) {
-            return $user->branch_id === $reservation->branch_id;
-        }
-
-        // 3. المشرف يملك صلاحية التعديل دائماً (مع تسجيل السبب في السيرفس)
-        return $user->hasAnyRole(['hq_supervisor']);
-    }
-
-    /**
-     * التدقيق والقفل (Audit & Lock): البند 3 و 4 في الوثيقة
-     * صلاحية سيادية للمشرفين والأمن فقط
-     */
-    public function audit(User $user): bool
-    {
-        return $user->hasAnyRole(['hq_supervisor', 'hq_security', 'hq_auditor']);
-    }
-
-    /**
-     * رؤية الوثائق: الأمن والمدقق فوق القفل، الموظف تحت القفل
-     */
-    public function viewDocuments(User $user, Reservation $reservation): bool
-    {
-        if ($user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor'])) {
+        // قبل القفل: supervisor دائماً
+        if ($user->hasRole('hq_supervisor')) {
             return true;
         }
 
-        return $user->hasRole('branch_reception') 
-               && $user->branch_id === $reservation->branch_id 
-               && !$reservation->is_locked;
+        // الاستقبال ضمن فرعه
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$reservation->branch_id;
     }
 
-    /**
-     * الحذف: سياسة "لا حذف نهائي" (البند 8)
-     */
-    public function delete(User $user, Reservation $reservation): bool
+    public function audit(User $user, Reservation $reservation): bool
     {
-        // المنع الافتراضي للجميع، والتعامل مع الأرشفة يتم عبر Soft Delete
-        return false; 
+        // تدقيق/قفل: supervisor فقط
+        return $user->hasRole('hq_supervisor');
     }
 
-    /**
-     * سجل التدقيق: حصراً للرقابة المركزية
-     */
-    public function viewAuditLogs(User $user): bool
+    public function checkOut(User $user, Reservation $reservation): bool
     {
-        return $user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor']);
+        // supervisor دائماً
+        if ($user->hasRole('hq_supervisor')) {
+            return true;
+        }
+
+        // الاستقبال ضمن فرعه + إقامة غير منتهية
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$reservation->branch_id
+            && is_null($reservation->actual_check_out);
+    }
+
+    public function viewDocuments(User $user, Reservation $reservation): bool
+    {
+        // الوثائق: supervisor/auditor/security
+        if ($user->hasAnyRole(['hq_supervisor', 'hq_auditor', 'hq_security'])) {
+            return true;
+        }
+
+        // الاستقبال: فقط إذا ضمن فرعه والسجل غير مقفل
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$reservation->branch_id
+            && !(bool)$reservation->is_locked;
     }
 }

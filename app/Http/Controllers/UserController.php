@@ -5,13 +5,14 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Services\UserService;
 use App\Http\Requests\StoreUserRequest;
+use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
 use Exception;
 
 class UserController extends Controller
 {
-    protected $userService;
+    protected UserService $userService;
 
     public function __construct(UserService $userService)
     {
@@ -19,27 +20,30 @@ class UserController extends Controller
         $this->userService = $userService;
     }
 
-    /**
-     * عرض قائمة المستخدمين (الموظفين)
-     * تحسين: جلب الحقول الأساسية فقط لمنع ثقل الـ JSON
-     */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         try {
             $this->authorize('viewAny', User::class);
 
-            /**
-             * تأكد أن الخدمة (UserService) تستخدم paginate 
-             * وأنها لا تجلب علاقة reservations لكل موظف داخل الـ index
-             */
-            $users = $this->userService->getUsersForManager();
+            $perPage = (int)$request->get('per_page', 20);
+            if ($perPage < 1) $perPage = 20;
+            if ($perPage > 100) $perPage = 100;
+
+            $filters = [
+                'branch_id' => $request->filled('branch_id') ? (int)$request->branch_id : null,
+                'status'    => $request->filled('status') ? (string)$request->status : null,
+                'q'         => $request->filled('q') ? trim((string)$request->q) : null,
+                'per_page'  => $perPage,
+            ];
+
+            $users = $this->userService->getUsersForManager($filters);
 
             return response()->json([
                 'status' => 'success',
                 'data'   => $users
             ]);
         } catch (Exception $e) {
-            Log::error("User Index Error: " . $e->getMessage());
+            Log::error("User Index Error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
             return response()->json([
                 'status' => 'error',
                 'message' => 'تعذر جلب قائمة الموظفين.'
@@ -47,30 +51,32 @@ class UserController extends Controller
         }
     }
 
-    /**
-     * إنشاء حساب موظف جديد وتعيين الصلاحيات
-     */
     public function store(StoreUserRequest $request): JsonResponse
     {
         try {
             $this->authorize('create', User::class);
 
-            // نقوم بإنشاء المستخدم عبر الخدمة لضمان تنفيذ منطق الـ Roles بشكل صحيح
-            $user = $this->userService->createUser($request->validated());
+            $result = $this->userService->createUser($request->validated());
+
+            /** @var User $user */
+            $user = $result['user'];
+            $roles = $result['roles'] ?? [];
 
             return response()->json([
                 'status'  => 'success',
                 'message' => 'تم إنشاء الحساب وتعيين الصلاحيات بنجاح',
                 'data'    => [
-                    'id'    => $user->id,
-                    'name'  => $user->name,
-                    'email' => $user->email,
-                    'roles' => $user->getRoleNames(), // نرسل الأدوار فقط بدلاً من كائن المستخدم كاملاً
+                    'id'        => $user->id,
+                    'name'      => $user->name,
+                    'email'     => $user->email,
+                    'branch_id' => $user->branch_id,
+                    'status'    => $user->status,
+                    'roles'     => $roles,
                 ]
             ], 201);
 
         } catch (Exception $e) {
-            Log::error("User Store Error: " . $e->getMessage());
+            Log::error("User Store Error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
             return response()->json([
                 'status' => 'error',
                 'message' => 'فشل إنشاء الحساب: ' . $e->getMessage()

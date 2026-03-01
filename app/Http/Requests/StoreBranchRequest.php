@@ -1,7 +1,9 @@
 <?php
+// app/Http/Requests/StoreBranchRequest.php
 
 namespace App\Http\Requests;
 
+use App\Models\Branch;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -9,48 +11,45 @@ class StoreBranchRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true; 
+        return true; // Policy بالـ Controller
     }
 
-    /**
-     * قواعد التحقق لضمان هوية فريدة وبيانات دقيقة لكل فرع
-     */
     public function rules(): array
     {
-        // استخراج المعرف بذكاء يدعم Route Model Binding
-        $branchId = $this->route('branch') instanceof \App\Models\Branch 
-                    ? $this->route('branch')->id 
-                    : $this->route('branch');
+        $branchParam = $this->route('branch');
+
+        $branchId = $branchParam instanceof Branch
+            ? (int) $branchParam->id
+            : (is_numeric($branchParam) ? (int) $branchParam : null);
 
         return [
             'name' => [
-                'required', 
-                'string', 
+                'required',
+                'string',
                 'max:255',
-                Rule::unique('branches', 'name')->ignore($branchId)
+                Rule::unique('branches', 'name')->ignore($branchId),
             ],
-            'address' => ['nullable', 'string', 'max:500'],
-            // تحسين: إضافة regex لضمان أن رقم الهاتف يحتوي على أرقام ورموز اتصال دولية فقط
-            'phone'   => ['nullable', 'string', 'max:20', 'regex:/^([0-9\s\-\+\(\)]*)$/'],
-            
-            // تحديد الحالة الافتراضية 'active' في حال لم يتم إرسالها
-            'status'  => ['required', Rule::in(['active', 'inactive'])],
-            
+
+            'city' => ['required', 'string', 'max:50'],
+
             'manager_name' => ['nullable', 'string', 'max:100'],
-            'city'         => ['required', 'string', 'max:50'], // جعل المدينة مطلوبة لأغراض الفلترة الأمنية
+
+            'address' => ['nullable', 'string', 'max:500'],
+
+            'phone' => ['nullable', 'string', 'max:20', 'regex:/^([0-9\s\-\+\(\)]*)$/'],
+
+            'status' => ['nullable', Rule::in(['active', 'inactive'])],
         ];
     }
 
-    /**
-     * تهيئة البيانات قبل التحقق (Sanitization)
-     */
-    protected function prepareForValidation()
+    protected function prepareForValidation(): void
     {
         $this->merge([
-            // تنظيف الاسم من المسافات الزائدة لضمان دقة قاعدة الـ unique
-            'name' => trim($this->name),
-            // تعيين حالة افتراضية إذا كان الحقل فارغاً
-            'status' => $this->status ?? 'active',
+            'name'         => trim((string) $this->input('name', '')),
+            'city'         => trim((string) $this->input('city', '')),
+            'manager_name' => $this->filled('manager_name') ? trim((string) $this->input('manager_name')) : null,
+            'phone'        => $this->filled('phone') ? trim((string) $this->input('phone')) : null,
+            'status'       => $this->input('status') ?: 'active',
         ]);
     }
 
@@ -59,9 +58,9 @@ class StoreBranchRequest extends FormRequest
         return [
             'name.required' => 'يجب إدخال اسم الفرع.',
             'name.unique'   => 'اسم هذا الفرع مسجل مسبقاً، يرجى استخدام اسم مختلف.',
+            'city.required' => 'يرجى تحديد المدينة التي يتبع لها الفرع.',
             'phone.regex'   => 'صيغة رقم الهاتف غير صحيحة.',
-            'status.required' => 'يجب تحديد حالة الفرع.',
-            'city.required'   => 'يرجى تحديد المدينة التي يتبع لها الفرع.',
+            'status.in'     => 'حالة الفرع يجب أن تكون active أو inactive.',
         ];
     }
 }

@@ -2,57 +2,32 @@
 
 namespace App\Policies;
 
-use App\Models\User;
 use App\Models\Branch;
+use App\Models\User;
 
 class BranchPolicy
 {
-    /**
-     * من يمكنه رؤية قائمة الفروع؟
-     * الإدارة المركزية والمدققون الأمنيون فقط في HQ
-     */
-    public function viewAny(User $user)
+    public function before(User $user, string $ability): ?bool
     {
-        return $user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor', 'hq_security']);
+        if (($user->status ?? '') !== 'active') return false;
+        return null;
     }
 
-    /**
-     * من يمكنه رؤية تفاصيل فرع محدد؟
-     */
-    public function view(User $user, Branch $branch)
+    public function viewAny(User $user): bool
     {
-        // إذا كان المستخدم من HQ يرى أي فرع
-        if ($user->hasAnyRole(['hq_admin', 'hq_supervisor', 'hq_auditor'])) {
-            return true;
-        }
-
-        // موظف الاستقبال يرى فقط بيانات الفرع الذي يعمل فيه
-        return $user->branch_id === $branch->id;
+        return $user->hasAnyRole(['hq_supervisor','hq_auditor']);
     }
 
-    /**
-     * من يمكنه إنشاء فروع جديدة؟
-     * صلاحية سيادية للمدير العام في HQ فقط
-     */
-    public function create(User $user)
+    public function view(User $user, Branch $branch): bool
     {
-        return $user->hasRole('hq_admin');
+        if ($user->hasAnyRole(['hq_supervisor','hq_auditor'])) return true;
+
+        // reception: فقط فرعه
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$branch->id;
     }
 
-    /**
-     * من يمكنه تعديل بيانات فرع (تغيير الاسم، الموقع، الحالة)؟
-     */
-    public function update(User $user, Branch $branch)
-    {
-        return $user->hasRole('hq_admin');
-    }
-
-    /**
-     * من يمكنه حذف فرع؟
-     * عادة لا يتم الحذف بل التعطيل، وتمنح فقط للـ Admin
-     */
-    public function delete(User $user, Branch $branch)
-    {
-        return $user->hasRole('hq_admin');
-    }
+    public function create(User $user): bool { return false; }
+    public function update(User $user, Branch $branch): bool { return false; }
+    public function delete(User $user, Branch $branch): bool { return false; }
 }

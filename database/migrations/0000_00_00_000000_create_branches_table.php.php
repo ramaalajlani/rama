@@ -6,25 +6,39 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
         Schema::create('branches', function (Blueprint $table) {
-   $table->id();
-        $table->string('name')->unique();
-        $table->string('address')->nullable();
-        $table->string('phone')->nullable(); // أضف هذا السطر
-        $table->string('status')->default('active'); // أضف هذا السطر
-        $table->softDeletes();         
-        $table->timestamps();
+            $table->id();
+
+            // الهوية الأساسية للفرع
+            $table->string('name')->unique();
+            $table->string('city', 50); // مهم للفلترة الأمنية
+            $table->string('address')->nullable();
+            $table->string('phone', 20)->nullable();
+
+            // مدير الفرع (اختياري)
+            $table->string('manager_name', 100)->nullable();
+
+            // الحالة التشغيلية
+            $table->enum('status', ['active', 'inactive'])->default('active');
+
+            // أمان وأداء
+            $table->softDeletes();
+            $table->timestamps();
+
+            /*
+            |------------------------------------------------------
+            | Indexes (تحسين الأداء)
+            |------------------------------------------------------
+            */
+
+            $table->index('city');
+            $table->index('status');
+            $table->index(['status', 'deleted_at']);
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('branches');

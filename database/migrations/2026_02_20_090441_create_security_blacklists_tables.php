@@ -6,49 +6,41 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * تشغيل التهيئة لجدول القائمة السوداء - النظام الأمني المشفر 2026
-     */
     public function up(): void
     {
         Schema::create('security_blacklists', function (Blueprint $table) {
             $table->id();
 
-            // 1. بصمات الهوية المشفرة (Identification Hashes)
-            $table->string('identity_hash')->unique()->index(); // هاش الرقم الوطني
+            // Hashes
+            $table->char('identity_hash', 64)->unique();
 
-            // 2. بصمات الأسماء المفصلة (Name Hashes)
-            $table->string('full_name_hash')->index();    // هاش الاسم الكامل واللقب
-            $table->string('father_name_hash')->nullable()->index();  // هاش اسم الأب منفصلاً
-            $table->string('mother_name_hash')->nullable()->index();  // هاش اسم الأم منفصلاً
-            
-            // بصمة أمنية مدمجة (الاسم + الأب + الأم) للمطابقة الثلاثية
-            $table->string('triple_check_hash')->index(); 
+            $table->char('full_name_hash', 64)->index();
+            $table->char('father_name_hash', 64)->nullable()->index();
+            $table->char('mother_name_hash', 64)->nullable()->index();
 
-            // 3. البصمة الشاملة (Full Hash) - الحقل الذي كان مفقوداً
-            // (الاسم الأول + الأب + الجد/العائلة + الأم)
-            $table->string('full_hash')->index(); 
+            $table->char('triple_check_hash', 64)->index();
+            $table->char('full_hash', 64)->index();
 
-            // 4. تصنيف المخاطر والتعليمات
-            // risk_level: (LOW, MEDIUM, HIGH, CRITICAL, WATCHLIST)
-            $table->string('risk_level')->default('WATCHLIST'); 
-            $table->text('reason')->nullable();       // سبب الإدراج (يظهر للإدارة فقط)
-            $table->text('instructions')->nullable(); // تعليمات موظف الاستقبال عند المطابقة
+            $table->string('risk_level')->default('WATCHLIST');
+            $table->text('reason')->nullable();
+            $table->text('instructions')->nullable();
 
-            // 5. الرقابة والمسؤولية
-            $table->foreignId('created_by')
-                  ->nullable()
+            $table->foreignId('created_by')->nullable()
                   ->constrained('users')
-                  ->onDelete('set null'); // الموظف المسؤول في HQ عن الإضافة
-            
-            $table->boolean('is_active')->default(true); // حالة القيد (فعال/معطل)
+                  ->nullOnDelete();
+
+            $table->boolean('is_active')->default(true);
+
             $table->timestamps();
+            $table->softDeletes(); // ✅ أضف هذا السطر
+
+            // Indexing
+            $table->index(['is_active', 'risk_level']);
+            $table->index(['created_by', 'created_at']);
+            $table->index('deleted_at'); // اختياري بس مفيد
         });
     }
 
-    /**
-     * تراجع عن التهيئة
-     */
     public function down(): void
     {
         Schema::dropIfExists('security_blacklists');

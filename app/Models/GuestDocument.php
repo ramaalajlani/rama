@@ -5,7 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Support\Facades\Storage; 
+use Illuminate\Support\Facades\Storage;
 use Spatie\Activitylog\Traits\LogsActivity;
 use Spatie\Activitylog\LogOptions;
 
@@ -16,63 +16,57 @@ class GuestDocument extends Model
     protected $table = 'guest_documents';
 
     protected $fillable = [
-        'reservation_id', 
-        'guest_id',      
+        'reservation_id',
+        'guest_id',
         'document_type',
         'file_path',
-        'file_name',      
-        'file_hash', 
-        'mime_type',      
+        'file_name',
+        'file_hash',
+        'mime_type',
         'file_size',
-        'uploaded_by' 
+        'uploaded_by',
     ];
 
-    /**
-     * 1. الحقول المخفية:
-     * نمنع تحميل بيانات النزيل والحجز بشكل JSON تلقائي داخل الوثيقة
-     * لتجنب الحلقات الدائرية (Infinite Loops) التي تعطل XAMPP.
-     */
     protected $hidden = [
-        'guest',
-        'reservation',
-        'file_path' // حماية أمنية للمسار الحقيقي على السيرفر
+        'file_path',
+        'file_hash',
     ];
 
-    /**
-     * إعدادات سجل النشاط للوثائق (Audit Log)
-     */
+    protected $casts = [
+        'id'             => 'integer',
+        'reservation_id' => 'integer',
+        'guest_id'       => 'integer',
+        'uploaded_by'    => 'integer',
+        'file_size'      => 'integer',
+        'document_type'  => 'string',
+    ];
+
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
+            ->useLogName('guest_documents_security')
             ->logOnly([
-                'document_type', 
-                'file_name', 
-                'file_hash', 
+                'document_type',
+                'file_name',
                 'guest_id',
-                'reservation_id'
+                'reservation_id',
             ])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
-            ->useLogName('security_monitor') 
-            ->setDescriptionForEvent(function(string $eventName) {
-                /**
-                 * 2. تحسين الأداء في السجل:
-                 * استخدام relationLoaded يمنع السيرفر من تنفيذ استعلام SQL جديد 
-                 * في كل مرة يتم فيها تسجيل نشاط، مما يسرع عملية الرفع.
-                 */
-                $guestName = $this->relationLoaded('guest') ? 
-                    "{$this->guest->first_name} {$this->guest->last_name}" : 
-                    "رقم: {$this->guest_id}";
-                
-                return "وثائق أمنية: تم {$eventName} ملف للنزيل: {$guestName} ضمن الحجز: #{$this->reservation_id}";
+            ->setDescriptionForEvent(function (string $eventName) {
+
+                $guestName = $this->relationLoaded('guest') && $this->guest
+                    ? $this->guest->full_name
+                    : "نزيل رقم {$this->guest_id}";
+
+                return match ($eventName) {
+                    'created'  => "تم رفع وثيقة للنزيل: {$guestName} ضمن الحجز رقم #{$this->reservation_id}",
+                    'updated'  => "تم تعديل بيانات وثيقة للنزيل: {$guestName} ضمن الحجز رقم #{$this->reservation_id}",
+                    'deleted'  => "تم حذف وثيقة للنزيل: {$guestName} ضمن الحجز رقم #{$this->reservation_id}",
+                    default    => "تم إجراء عملية على وثيقة تخص النزيل: {$guestName}",
+                };
             });
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | العلاقات (Relationships)
-    |--------------------------------------------------------------------------
-    */
 
     public function guest(): BelongsTo
     {
@@ -89,21 +83,14 @@ class GuestDocument extends Model
         return $this->belongsTo(User::class, 'uploaded_by');
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | الوظائف الأمنية (Security Functions)
-    |--------------------------------------------------------------------------
-    */
-
     public function isIntegrityValid(): bool
     {
-        // استخدام التخزين الخاص لضمان الأمان
         if (!Storage::disk('private')->exists($this->file_path)) {
             return false;
         }
 
         $currentHash = hash_file('sha256', Storage::disk('private')->path($this->file_path));
-        
-        return $this->file_hash === $currentHash;
+
+        return hash_equals((string)$this->file_hash, (string)$currentHash);
     }
 }

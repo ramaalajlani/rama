@@ -3,100 +3,168 @@
 namespace App\Services;
 
 use App\Models\User;
-use Illuminate\Support\Facades\{Auth, Cache, Log};
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cookie;
 use Laravel\Sanctum\PersonalAccessToken;
+use Throwable;
 
 class AuthService
 {
     /**
-     * محاولة تسجيل الدخول والتحقق من حالة الحساب
+     * محاولة تسجيل الدخول
      */
     public function attemptLogin(array $credentials, bool $remember, Request $request)
     {
-        // محاولة التحقق من البيانات عبر حارس الويب
+        // ✅ guard الافتراضي عادة web
         if (!Auth::guard('web')->attempt($credentials, $remember)) {
-            return false; 
+            return false;
         }
 
-        // جلب المستخدم مع علاقة الفرع لضمان كفاءة الأداء N+1
-        $user = User::with('branch')->where('email', $credentials['email'])->first();
+        /** @var User|null $user */
+        $user = User::query()
+            ->with('branch')
+            ->where('email', (string)($credentials['email'] ?? ''))
+            ->first();
 
-        // التحقق من حالة الحساب
-        if (!$user->status === 'active') { // افترضنا أن الحقل اسمه status
+        if (!$user) {
+            Auth::guard('web')->logout();
+            return false;
+        }
+
+        if (($user->status ?? null) !== 'active') {
             Auth::guard('web')->logout();
             return 'inactive';
         }
 
-        // إنشاء التوكن والكوكي
-        return $this->generateTokenAndCookie($user);
+        return $this->generateTokenAndCookie($user, $remember, $request);
     }
 
     /**
-     * توليد توكن جديد وكوكي HttpOnly محمية
+     * توليد توكن + Cookie
      */
-    private function generateTokenAndCookie($user)
+    private function generateTokenAndCookie(User $user, bool $remember, Request $request): array
     {
-        // إنشاء التوكن مع صلاحية لمدة ساعتين (يمكن تعديلها)
-        $tokenResult = $user->createToken('access_token', ['*'], now()->addHours(2));
+        // ✅ إذا بدك تمنع خروج الأجهزة الأخرى احذف هذا السطر
+        $user->tokens()->delete();
+
+        // مدة التوكن/الكوكي
+        $minutes = $remember ? (60 * 24 * 30) : 120; // remember=30 يوم, غيره=120 دقيقة
+        $expiresAt = now()->addMinutes($minutes);
+
+        // ✅ Sanctum createToken (يدعم expiresAt في نسخ حديثة)
+        $tokenResult = $user->createToken('access_token', ['*'], $expiresAt);
         $accessToken = $tokenResult->plainTextToken;
 
-        // إعداد الكوكي (Refresh Token)
+        // إعدادات الكوكي
+        $domain = config('session.domain') ?: null; // localhost = null أفضل
+        $path   = '/';
+
+        // secure: إذا الطلب مو https => لازم false
+        $secure = (bool) config('session.secure', false);
+        if (!$request->isSecure()) {
+            $secure = false;
+        }
+
+        // sameSite
+        $sameSite = (string) config('session.same_site', 'lax');
+        $sameSite = strtolower($sameSite);
+
+        /**
+         * ⚠️ مهم:
+         * - cross-site يحتاج SameSite=none + Secure=true (يعني HTTPS)
+         * - على http local، SameSite=none رح تنرفض من المتصفح
+         */
+        if (!$secure && $sameSite === 'none') {
+            $sameSite = 'lax';
+        }
+
         $cookie = cookie(
-            'refresh_token',
+            'access_token',
             $accessToken,
-            1440, // صالحة لـ 24 ساعة
-            '/',
-            null,
-            config('session.secure'), // تفعيل Secure في حالة HTTPS
-            true,  // HttpOnly: حماية ضد XSS
+            $minutes,
+            $path,
+            $domain,
+            $secure,
+            true,    // HttpOnly
             false,
-            'Lax'  // حماية ضد CSRF
+            $sameSite
         );
 
         return [
             'user'   => $user,
-            'token'  => $accessToken,
-            'cookie' => $cookie
+            // ✅ Cookie-only auth: لا ترجع token للفرونت
+            // 'token'  => $accessToken,
+            'cookie' => $cookie,
         ];
     }
 
     /**
-     * تجديد التوكن بناءً على الكوكي المخزنة
+     * تجديد التوكن
      */
-    public function refreshToken(Request $request)
+    public function refreshToken(Request $request): ?array
     {
-        $token = $request->cookie('refresh_token');
-        if (!$token) return null;
+        try {
+            $token = (string) $request->cookie('access_token', '');
+            if ($token === '') return null;
 
-        $personalAccessToken = PersonalAccessToken::findToken($token);
+            $personalAccessToken = PersonalAccessToken::findToken($token);
+            if (!$personalAccessToken) return null;
 
-        // التحقق من صلاحية التوكن القديم
-        if (!$personalAccessToken || ($personalAccessToken->expires_at && $personalAccessToken->expires_at->isPast())) {
+            // انتهت صلاحية التوكن
+            if ($personalAccessToken->expires_at && $personalAccessToken->expires_at->isPast()) {
+                $personalAccessToken->delete();
+                return null;
+            }
+
+            $user = $personalAccessToken->tokenable;
+            if (!$user) {
+                $personalAccessToken->delete();
+                return null;
+            }
+
+            // ✅ rotate token
+            $personalAccessToken->delete();
+
+            // refresh عادة نخليه "remember=true" ليعطي مدة أطول
+            return $this->generateTokenAndCookie($user, true, $request);
+
+        } catch (Throwable $e) {
+            Log::error("refreshToken error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
             return null;
         }
-
-        $user = $personalAccessToken->tokenable;
-
-        // حذف التوكن القديم فوراً (زيادة أمان لضمان عدم إعادة استخدامه)
-        $personalAccessToken->delete();
-
-        // توليد زوج جديد (Token + Cookie)
-        return $this->generateTokenAndCookie($user);
     }
 
     /**
-     * تنفيذ خروج المستخدم وتنظيف الكاش
+     * تسجيل الخروج
      */
     public function executeLogout(Request $request)
     {
-        $user = Auth::user();
-        if ($user) {
-            $user->currentAccessToken()?->delete();
-            Cache::forget("user_permissions_{$user->id}");
+        try {
+            // ✅ احذف التوكن حتى لو request->user() مو جاهز
+            $token = (string) $request->cookie('access_token', '');
+            if ($token !== '') {
+                $pat = PersonalAccessToken::findToken($token);
+                $uid = $pat?->tokenable_id;
+
+                $pat?->delete();
+
+                if ($uid) {
+                    Cache::forget("user_permissions_{$uid}");
+                    Cache::increment("auth:permver:user:{$uid}");
+                }
+            }
+
+            Auth::guard('web')->logout();
+
+        } catch (Throwable $e) {
+            Log::warning("executeLogout error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
         }
 
-        Auth::guard('web')->logout();
-        return cookie()->forget('refresh_token');
+        // ✅ امسح cookie بنفس path/domain
+        $domain = config('session.domain') ?: null;
+        return cookie()->forget('access_token', '/', $domain);
     }
 }

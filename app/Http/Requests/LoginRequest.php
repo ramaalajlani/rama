@@ -3,55 +3,47 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rules\Password;
 
 class LoginRequest extends FormRequest
 {
-    /**
-     * السماح لجميع الزوار بالوصول لمحاولة تسجيل الدخول
-     */
     public function authorize(): bool
     {
-        return true; 
+        return true;
     }
 
-    /**
-     * قواعد التحقق: أضفنا قيوداً لمنع الطلبات العشوائية الضخمة
-     */
     public function rules(): array
     {
         return [
-            // إضافة 'max' تمنع المهاجم من إرسال نصوص طويلة جداً لإجهاد السيرفر
-            'email'    => ['required', 'email', 'string', 'max:255'],
-            
-            // Password::default() يضمن توافق كلمة المرور مع معايير الأمان التي حددتها في AppServiceProvider
-            'password' => ['required', 'string', 'min:8'], 
-            
+            'email'    => ['required', 'string', 'email', 'max:255'],
+
+            // ✅ Login: لا تفرض Password Policy تبع التسجيل
+            'password' => ['required', 'string'],
+
             'remember' => ['nullable', 'boolean'],
         ];
     }
 
-    /**
-     * رسائل الخطأ بالعربية لتجربة مستخدم أفضل
-     */
+    protected function prepareForValidation(): void
+    {
+        $remember = filter_var(
+            $this->input('remember'),
+            FILTER_VALIDATE_BOOLEAN,
+            FILTER_NULL_ON_FAILURE
+        );
+
+        $this->merge([
+            'email'    => strtolower(trim((string) $this->input('email'))),
+            'remember' => $remember ?? false, // ✅ خليها false بدل null
+        ]);
+    }
+
     public function messages(): array
     {
         return [
             'email.required'    => 'حقل البريد الإلكتروني مطلوب للمتابعة.',
             'email.email'       => 'يرجى إدخال بريد إلكتروني بصيغة صحيحة (example@mail.com).',
             'password.required' => 'كلمة المرور مطلوبة للدخول إلى النظام.',
-            'password.min'      => 'كلمة المرور يجب ألا تقل عن 8 رموز.',
+            'remember.boolean'  => 'قيمة remember يجب أن تكون true أو false.',
         ];
-    }
-
-    /**
-     * ميزة احترافية: تهيئة البيانات قبل التحقق
-     * لضمان عدم فشل الدخول بسبب مسافة زائدة (Space) في الإيميل بالخطأ
-     */
-    protected function prepareForValidation()
-    {
-        $this->merge([
-            'email' => strtolower(trim($this->email)),
-        ]);
     }
 }

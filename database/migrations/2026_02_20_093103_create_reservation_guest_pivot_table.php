@@ -11,30 +11,45 @@ return new class extends Migration
         Schema::create('reservation_guest', function (Blueprint $table) {
             $table->id();
 
-            // 1. الربط الأساسي
             $table->foreignId('reservation_id')
-                  ->constrained('guest_reservations')
-                  ->onDelete('cascade');
+                ->constrained('guest_reservations')
+                ->cascadeOnDelete();
 
             $table->foreignId('guest_id')
-                  ->constrained('guests')
-                  ->onDelete('restrict');
+                ->constrained('guests')
+                ->restrictOnDelete();
 
-            // 2. نوع التواجد (أساسي أو مرافق)
+            $table->foreignId('companion_of_guest_id')
+                ->nullable()
+                ->constrained('guests')
+                ->restrictOnDelete();
+
             $table->enum('participant_type', ['primary', 'companion'])->default('companion');
 
-            // 3. التتبع اللوجستي (رقم السيارة نصاً فقط)
-            // سجلنا السيارة هنا لربط كل نزيل بمركبته الخاصة أثناء هذا الحجز
-            $table->string('vehicle_plate_at_checkin')->nullable()->index(); 
+            $table->string('relationship', 30)->nullable();
 
-            // 4. الرقابة الأمنية (بصمة مدخل البيانات)
-            // لمعرفة من الموظف الذي سجل هذا النزيل تحديداً في هذا الحجز
-            $table->foreignId('registered_by')
-                  ->nullable()
-                  ->constrained('users')
-                  ->onDelete('set null');
-            
+            $table->string('vehicle_plate_at_checkin')->nullable()->index();
+
+            $table->foreignId('registered_by')->nullable()
+                ->constrained('users')
+                ->nullOnDelete();
+
             $table->timestamps();
+
+            // Integrity
+            $table->unique(['reservation_id', 'guest_id'], 'uq_reservation_guest');
+
+            // -------------------------
+            // Performance indexes
+            // -------------------------
+            $table->index(['guest_id', 'reservation_id'], 'idx_guest_reservation');
+            $table->index(['guest_id', 'id'], 'idx_guest_last_row');
+
+            // ✅ أهم فهرس لسرعة جلب primary
+            $table->index(['reservation_id', 'participant_type'], 'idx_res_primary');
+
+            $table->index(['reservation_id', 'companion_of_guest_id'], 'idx_res_companion_of');
+            $table->index(['companion_of_guest_id', 'relationship'], 'idx_companion_relationship');
         });
     }
 

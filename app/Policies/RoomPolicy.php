@@ -10,59 +10,66 @@ class RoomPolicy
 {
     use HandlesAuthorization;
 
-    /**
-     * من يمكنه رؤية قائمة الغرف؟
-     * الجميع يمكنه الرؤية، ولكن الموديل (Global Scope) سيحدد لكل موظف فرعه فقط.
-     */
-    public function viewAny(User $user)
+    public function before(User $user, string $ability): ?bool
     {
-        return $user->hasAnyRole(['branch_reception', 'hq_admin', 'hq_supervisor', 'hq_auditor']);
-    }
+        if (($user->status ?? '') !== 'active') {
+            return false;
+        }
 
-    /**
-     * من يمكنه إضافة غرف جديدة للنظام؟
-     * حصرياً للإدارة المركزية لضبط سعة الفنادق.
-     */
-    public function create(User $user)
-    {
-        return $user->hasAnyRole(['hq_admin', 'hq_supervisor']);
-    }
-
-    /**
-     * من يمكنه تعديل بيانات الغرفة (الرقم، الطابق، النوع)؟
-     */
-    public function update(User $user, Room $room)
-    {
-        // الإدارة المركزية تعدل أي شيء
-        if ($user->hasAnyRole(['hq_admin', 'hq_supervisor'])) {
+        if ($user->hasRole('hq_admin')) {
             return true;
         }
 
-        // موظف الفرع يمكنه التعديل فقط في فرعه (بشرط عدم تغيير الهيكل الأساسي)
-        return $user->branch_id === $room->branch_id && $user->hasRole('branch_reception');
+        return null;
     }
 
-    /**
-     * من يمكنه تغيير حالة الغرفة (متاحة، صيانة، مسكونة)؟
-     * مهم جداً للرقابة الأمنية لمنع التسكين "تحت الطاولة"
-     */
-    public function changeStatus(User $user, Room $room)
+    public function viewAny(User $user): bool
     {
-        // الإدارة المركزية لها الحق في إغلاق أي غرفة للصيانة الأمنية
-        if ($user->hasAnyRole(['hq_admin', 'hq_security'])) {
+        return $user->hasAnyRole([
+            'branch_reception',
+            'hq_supervisor',
+            'hq_auditor',
+            'hq_security'
+        ]);
+    }
+
+    public function view(User $user, Room $room): bool
+    {
+        if ($user->hasAnyRole(['hq_supervisor', 'hq_auditor', 'hq_security'])) {
             return true;
         }
 
-        // موظف الفرع يغير الحالة فقط لغرف فرعه
-        return $user->branch_id === $room->branch_id && $user->hasRole('branch_reception');
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$room->branch_id;
     }
 
-    /**
-     * من يمكنه حذف غرفة؟
-     * ممنوع تماماً إلا للمدير العام (hq_admin)
-     */
-    public function delete(User $user, Room $room)
+    public function create(User $user): bool
     {
-        return $user->hasRole('hq_admin');
+        return $user->hasRole('hq_supervisor');
+    }
+
+    public function update(User $user, Room $room): bool
+    {
+        if ($user->hasRole('hq_supervisor')) {
+            return true;
+        }
+
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$room->branch_id;
+    }
+
+    public function updateStatus(User $user, Room $room): bool
+    {
+        if ($user->hasAnyRole(['hq_security', 'hq_supervisor'])) {
+            return true;
+        }
+
+        return $user->hasRole('branch_reception')
+            && (int)$user->branch_id === (int)$room->branch_id;
+    }
+
+    public function delete(User $user, Room $room): bool
+    {
+        return false;
     }
 }

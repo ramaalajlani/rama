@@ -1,4 +1,5 @@
 <?php
+// app/Models/Room.php
 
 namespace App\Models;
 
@@ -17,49 +18,78 @@ class Room extends Model
     protected $table = 'rooms';
 
     protected $fillable = [
-        'branch_id',    // ربط الغرفة بفرع محدد
-        'room_number',  // رقم الغرفة (معرف بصري)
-        'floor_number', // رقم الطابق لتسهيل التفتيش الأمني
-        'type',         // نوع الغرفة (فردية، مزدوجة، جناح)
-        'status',       // الحالات: available (متاحة)، occupied (مسكونة)، maintenance (صيانة أمنية/فنية)
-        'description'   // ملاحظات إضافية حول موقع الغرفة أو ميزاتها
+        'branch_id',
+        'room_number',
+        'floor_number',
+        'type',
+        'status',
+        'description',
     ];
 
-    /**
-     * 1. الحقول المخفية (Hidden):
-     * نمنع تحميل العلاقات بشكل تلقائي عند تحويل الموديل إلى JSON
-     * لكسر أي حلقة دوران مع الحجوزات أو الفروع.
-     */
     protected $hidden = [
-        'reservations',
-        'branch',
-        'deleted_at'
+        'deleted_at',
     ];
 
-    /**
-     * إعدادات سجل التدقيق (Audit Log)
-     */
+    protected $casts = [
+        'id' => 'integer',
+        'branch_id' => 'integer',
+        'floor_number' => 'integer',
+        'status' => 'string',
+        'type' => 'string',
+    ];
+
+    /*
+    |--------------------------------------------------------------------------
+    | Activity Log (Spatie)
+    |--------------------------------------------------------------------------
+    */
+
     public function getActivitylogOptions(): LogOptions
     {
         return LogOptions::defaults()
-            ->logOnly(['room_number', 'floor_number', 'status', 'branch_id'])
+            ->useLogName('facility_management')
+            ->logOnly([
+                'room_number',
+                'floor_number',
+                'status',
+                'branch_id',
+                'type',
+            ])
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
-            ->useLogName('security_monitor') 
-            ->setDescriptionForEvent(function(string $eventName) {
-                return "إدارة المرافق: تم {$eventName} بيانات الغرفة {$this->room_number} (الطابق: {$this->floor_number})";
+            ->setDescriptionForEvent(function (string $eventName) {
+
+                return match ($eventName) {
+
+                    'created' =>
+                        "تم إنشاء غرفة رقم {$this->room_number} (طابق {$this->floor_number})",
+
+                    'updated' =>
+                        $this->wasChanged('status')
+                            ? "تم تغيير حالة الغرفة {$this->room_number} إلى ({$this->status})"
+                            : "تم تعديل بيانات الغرفة {$this->room_number}",
+
+                    'deleted' =>
+                        "تم تعطيل الغرفة {$this->room_number} (حذف منطقي)",
+
+                    'restored' =>
+                        "تم استرجاع الغرفة {$this->room_number}",
+
+                    default =>
+                        "تم تنفيذ إجراء على الغرفة {$this->room_number}",
+                };
             });
     }
 
     /*
     |--------------------------------------------------------------------------
-    | العلاقات (Relationships)
+    | Relationships
     |--------------------------------------------------------------------------
     */
 
     public function branch(): BelongsTo
     {
-        return $this->belongsTo(Branch::class);
+        return $this->belongsTo(Branch::class, 'branch_id');
     }
 
     public function reservations(): HasMany
@@ -69,22 +99,27 @@ class Room extends Model
 
     /*
     |--------------------------------------------------------------------------
-    | النطاقات (Scopes)
+    | Scopes (Indexed)
     |--------------------------------------------------------------------------
     */
 
-    public function scopeAvailable($query)
+    public function scopeAvailable($q)
     {
-        return $query->where('status', 'available');
+        return $q->where('status', 'available');
     }
 
-    public function scopeInMaintenance($query)
+    public function scopeInMaintenance($q)
     {
-        return $query->where('status', 'maintenance');
+        return $q->where('status', 'maintenance');
     }
 
-    public function scopeOccupied($query)
+    public function scopeOccupied($q)
     {
-        return $query->where('status', 'occupied');
+        return $q->where('status', 'occupied');
+    }
+
+    public function scopeForBranch($q, int $branchId)
+    {
+        return $q->where('branch_id', $branchId);
     }
 }

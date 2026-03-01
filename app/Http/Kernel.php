@@ -6,21 +6,15 @@ use Illuminate\Foundation\Http\Kernel as HttpKernel;
 
 class Kernel extends HttpKernel
 {
-    /**
-     * الـ Middleware العالمي (Global) الذي يعمل على كل الطلبات.
-     */
     protected $middleware = [
         \App\Http\Middleware\TrustProxies::class,
-        \Illuminate\Http\Middleware\HandleCors::class, 
+        \Illuminate\Http\Middleware\HandleCors::class,
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,
         \App\Http\Middleware\TrimStrings::class,
         \Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull::class,
     ];
 
-    /**
-     * مجموعات الـ Middleware للـ Web والـ API.
-     */
     protected $middlewareGroups = [
         'web' => [
             \App\Http\Middleware\EncryptCookies::class,
@@ -32,23 +26,14 @@ class Kernel extends HttpKernel
         ],
 
         'api' => [
-            // 1. تفعيل الحالة للجبهة الأمامية (ضروري لـ Sanctum)
-            \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
-            
-            // 2. تفعيل معالجة الكوكيز والجلسات في الـ API (هذا ما كان ينقصك)
-            \App\Http\Middleware\EncryptCookies::class,
-            \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
-            \Illuminate\Session\Middleware\StartSession::class,
-            
-            // 3. بقية الإعدادات الافتراضية
+            // ✅ يحول Cookie token إلى Authorization Bearer قبل auth:sanctum
+            \App\Http\Middleware\BearerTokenFromCookie::class,
+
             'throttle:api',
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
         ],
     ];
 
-    /**
-     * الـ Middleware المخصص الذي يمكن استدعاؤه بشكل فردي.
-     */
     protected $routeMiddleware = [
         'auth' => \App\Http\Middleware\Authenticate::class,
         'auth.basic' => \Illuminate\Auth\Middleware\AuthenticateWithBasicAuth::class,

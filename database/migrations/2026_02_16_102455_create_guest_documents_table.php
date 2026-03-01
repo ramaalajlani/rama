@@ -6,54 +6,43 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * تشغيل التهيئة لجدول الوثائق الأمنية - الإصدار الرقابي 2026
-     */
     public function up(): void
     {
         Schema::create('guest_documents', function (Blueprint $table) {
             $table->id();
 
-            // 1. الروابط الأساسية (التدقيق المتقاطع)
-            // الحجز المرتبط بالوثيقة
             $table->foreignId('reservation_id')
                   ->constrained('guest_reservations')
-                  ->onDelete('cascade');
+                  ->cascadeOnDelete();
 
-            // النزيل صاحب الوثيقة
             $table->foreignId('guest_id')
                   ->constrained('guests')
-                  ->onDelete('cascade');
+                  ->cascadeOnDelete();
 
-            // 2. البيانات التقنية للملف (Security & Storage)
-            $table->string('file_path');    // مسار التخزين (يفضل أن يكون Private Storage)
-            $table->string('file_name');    // اسم الملف عند الرفع
-            
-            // بصمة الملف (Hash): لضمان عدم استبدال صورة الهوية بعد تدقيقها من الـ HQ
-            $table->string('file_hash')->index(); 
-            
-            $table->string('mime_type');    // نوع الملف (image/jpeg, application/pdf)
-            $table->integer('file_size');   // حجم الملف بالكيلوبايت
+            $table->string('file_path');
+            $table->string('file_name');
 
-            // 3. التصنيف الرقابي
-            // أنواع الوثائق: identity (هوية), passport (جواز), personal_photo (صورة شخصية)
-            // ملاحظة: رقم السيارة لا يرفع هنا كصورة بل يسجل نصاً في جدول الحجوزات
+            // If hash is SHA-256 hex => 64 chars
+            $table->char('file_hash', 64)->index();
+
+            $table->string('mime_type');
+            $table->unsignedInteger('file_size'); // KB or bytes (choose and keep consistent)
+
             $table->string('document_type')->default('identity')->index();
 
-            // 4. سجل المسؤولية (Audit Trail)
-            // معرف الموظف الذي قام برفع الوثيقة في الفرع
-            $table->foreignId('uploaded_by')
-                  ->nullable()
+            $table->foreignId('uploaded_by')->nullable()
                   ->constrained('users')
-                  ->onDelete('set null');
+                  ->nullOnDelete();
 
             $table->timestamps();
+
+            // Indexing (performance)
+            $table->index(['reservation_id', 'document_type']);
+            $table->index(['guest_id', 'document_type']);
+            $table->index(['uploaded_by', 'created_at']);
         });
     }
 
-    /**
-     * تراجع عن التهيئة
-     */
     public function down(): void
     {
         Schema::dropIfExists('guest_documents');

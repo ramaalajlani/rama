@@ -9,60 +9,59 @@ class UpdateReservationRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        // يفضل التحقق من أن الحجز ليس "مكتمل" قبل السماح بأي تعديل
-        $reservation = $this->route('reservation');
-        return auth()->check() && (!$reservation || $reservation->status !== 'completed');
+        return auth()->check();
     }
 
     public function rules(): array
     {
+        /** @var \App\Models\Reservation|null $reservation */
         $reservation = $this->route('reservation');
-        
-        // جلب الحجز مع النزلاء للتحقق من وجود أي نزيل محظور ضمن المجموعة
-        // نتحقق مما إذا كان أي شخص في الغرفة مدرج في القائمة السوداء
-        $hasBlacklistedGuest = $reservation && $reservation->guests()
-            ->where('status', 'blacklisted')
-            ->exists();
 
-        // نتحقق مما إذا كان الحجز مقفلاً إدارياً
-        $isLocked = $reservation && $reservation->is_locked;
+        $isLocked = (bool)($reservation?->is_locked ?? false);
+        $isAudited = (($reservation?->audit_status ?? '') === 'audited');
+
+        // إذا مقفل أو audited => ممنوع تعديل الحقول الحساسة
+        $prohibit = ($isLocked || $isAudited) ? 'prohibited' : 'sometimes';
 
         return [
-            // إذا وجد حظر أمني أو قفل إداري، نمنع تعديل التفاصيل اللوجستية
-            'room_id'   => [($hasBlacklistedGuest || $isLocked) ? 'prohibited' : 'sometimes', 'exists:rooms,id'],
-            'check_in'  => [($hasBlacklistedGuest || $isLocked) ? 'prohibited' : 'sometimes', 'date'],
-            'check_out' => [($hasBlacklistedGuest || $isLocked) ? 'prohibited' : 'sometimes', 'date', 'after:check_in'],
-            
-            // الحالة: لا يمكن إلغاء الحجز إذا كان هناك نزيل محظور إلا عبر الـ HQ
+            // ✅ مطابق للـ migration + منطق القفل
+            'room_id'   => [$prohibit, 'integer', 'exists:rooms,id'],
+
+            'check_in'  => [$prohibit, 'date'],
+
+            // ✅ check_out nullable بالمهاجرة
+            'check_out' => [$prohibit, 'nullable', 'date', 'after:check_in'],
+
+            // ✅ مطابق لقيم المهاجرة
             'status'    => [
-                'sometimes', 
-                'in:pending,confirmed,checked_out,cancelled',
-                function ($attribute, $value, $fail) use ($hasBlacklistedGuest) {
-                    if ($value === 'cancelled' && $hasBlacklistedGuest && !auth()->user()->hasRole('hq_admin')) {
-                        $fail('لا يمكن إلغاء حجز لنزيل محظور أمنياً إلا من خلال الإدارة المركزية.');
-                    }
-                }
+                'sometimes',
+                'string',
+                Rule::in(['pending', 'confirmed', 'checked_out', 'cancelled']),
             ],
 
-            // السبب إجباري عند وجود حظر أو قفل، أو عند تغيير الحالة لـ cancelled
-            'reason'    => [
-                ($hasBlacklistedGuest || $isLocked || $this->status === 'cancelled') ? 'required' : 'nullable',
-                'string', 
-                'min:10', 
-                'max:500'
+            // ✅ سبب التعديل مطلوب فقط إذا السجل مقفل/مدقق "وعم تبعت تعديل"
+            // إذا بدك يكون إلزامي دائماً عند أي update للسجل المقفل، خلّيه required_without... (حسب UI)
+            'audit_notes' => [
+                ($isLocked || $isAudited) ? 'sometimes' : 'nullable',
+                'nullable',
+                'string',
+                'min:10',
+                'max:500',
             ],
-            
-            'security_notes' => ['nullable', 'string', 'max:1000'],
+
+            'security_notes' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            'vehicle_plate'  => ['sometimes', 'nullable', 'string', 'max:20'],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'reason.required'    => 'عذراً، هذا الحجز مقفل أو مرتبط بنزيل "قيد التدقيق". لا يمكن التعديل بدون ذكر سبب إداري مفصل.',
-            'room_id.prohibited' => 'التعديلات اللوجستية (الغرفة/الموعد) مجمدة لهذا الحجز لأسباب أمنية أو إدارية.',
-            'reason.min'         => 'يرجى كتابة شرح وافٍ لسبب التعديل (10 حروف على الأقل).',
-            'check_out.after'    => 'تاريخ المغادرة يجب أن يكون بعد تاريخ الدخول.',
+            'room_id.prohibited'    => 'هذا السجل مقفل/مدقق ولا يمكن تعديل الغرفة.',
+            'check_in.prohibited'   => 'هذا السجل مقفل/مدقق ولا يمكن تعديل تاريخ الدخول.',
+            'check_out.prohibited'  => 'هذا السجل مقفل/مدقق ولا يمكن تعديل تاريخ الخروج.',
+            'audit_notes.min'       => 'يرجى كتابة سبب واضح (10 أحرف على الأقل).',
+            'check_out.after'       => 'تاريخ المغادرة يجب أن يكون بعد تاريخ الدخول.',
         ];
     }
 }

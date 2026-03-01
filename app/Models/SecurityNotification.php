@@ -1,68 +1,111 @@
 <?php
+// app/Models/SecurityNotification.php
 
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Spatie\Activitylog\Traits\LogsActivity;
+use Spatie\Activitylog\LogOptions;
 
 class SecurityNotification extends Model
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes, LogsActivity;
 
     protected $table = 'security_notifications';
 
     protected $fillable = [
         'blacklist_id',
-        'guest_id',           // ربط مباشر بالنزيل المشبوه
-        'reservation_id',     // ربط بالحجز الذي تمت فيه المحاولة
-        'branch_name',        // الفرع الذي رصد المحاولة
-        'receptionist_name',  // الموظف المواجه للنزيل
-        'car_plate_captured', // رقم السيارة التي رُصدت في هذه اللحظة (Snapshot)
-        'risk_level',         // مستوى الخطورة وقت التنبيه
-        'alert_message',      // تفاصيل التنبيه (مثلاً: تطابق بصمة الاسم الثلاثي)
-        'instructions',       // التعليمات التي أُعطيت للموظف آلياً
-        'read_at',            // وقت اطلاعك على الإشعار في HQ
-        'read_by'             // من هو المدقق الذي عالج الإشعار
+        'guest_id',
+        'reservation_id',
+        'branch_name',
+        'receptionist_name',
+        'car_plate_captured',
+        'risk_level',
+        'alert_message',
+        'instructions',
+        'read_at',
+        'read_by',
     ];
 
     protected $casts = [
+        'id' => 'integer',
+        'blacklist_id' => 'integer',
+        'guest_id' => 'integer',
+        'reservation_id' => 'integer',
+        'read_by' => 'integer',
         'read_at' => 'datetime',
+        'risk_level' => 'string',
+    ];
+
+    protected $hidden = [
+        'deleted_at',
     ];
 
     /*
     |--------------------------------------------------------------------------
-    | العلاقات (Relationships) - لعرض "كل شيء" في لوحة التحكم
+    | Activity Log (أمني مركزي)
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * جلب بيانات الشخص من القائمة السوداء (لمعرفة سبب الحظر الأصلي)
-     */
+    public function getActivitylogOptions(): LogOptions
+    {
+        return LogOptions::defaults()
+            ->useLogName('security_alerts')
+            ->logOnly([
+                'risk_level',
+                'read_at',
+                'read_by',
+            ])
+            ->logOnlyDirty()
+            ->dontSubmitEmptyLogs()
+            ->setDescriptionForEvent(function (string $eventName) {
+
+                return match ($eventName) {
+
+                    'created' =>
+                        "تم إنشاء تنبيه أمني مرتبط بالحجز رقم #{$this->reservation_id}",
+
+                    'updated' =>
+                        $this->wasChanged('read_at')
+                            ? "تم الاطلاع على التنبيه الأمني المرتبط بالحجز رقم #{$this->reservation_id}"
+                            : "تم تعديل بيانات تنبيه أمني",
+
+                    'deleted' =>
+                        "تم حذف منطقي لتنبيه أمني مرتبط بالحجز رقم #{$this->reservation_id}",
+
+                    'restored' =>
+                        "تم استرجاع تنبيه أمني مرتبط بالحجز رقم #{$this->reservation_id}",
+
+                    default =>
+                        "تم تنفيذ إجراء على تنبيه أمني",
+                };
+            });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Relationships
+    |--------------------------------------------------------------------------
+    */
+
     public function blacklist(): BelongsTo
     {
         return $this->belongsTo(SecurityBlacklist::class, 'blacklist_id');
     }
 
-    /**
-     * جلب ملف النزيل الحالي (لمقارنة بياناته الحالية بما هو مسجل في البلاك ليست)
-     */
     public function guest(): BelongsTo
     {
         return $this->belongsTo(Guest::class, 'guest_id');
     }
 
-    /**
-     * جلب بيانات الحجز (لمعرفة الغرفة والتوقيت)
-     */
     public function reservation(): BelongsTo
     {
         return $this->belongsTo(Reservation::class, 'reservation_id');
     }
 
-    /**
-     * المدقق من الـ HQ الذي اطلع على التنبيه وعالجه
-     */
     public function reader(): BelongsTo
     {
         return $this->belongsTo(User::class, 'read_by');
@@ -70,15 +113,28 @@ class SecurityNotification extends Model
 
     /*
     |--------------------------------------------------------------------------
-    | وظائف مساعدة (Helpers)
+    | Scopes
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * هل تم الاطلاع على هذا الإشعار من قبل الإدارة؟
-     */
+    public function scopeUnread($q)
+    {
+        return $q->whereNull('read_at');
+    }
+
+    public function scopeRead($q)
+    {
+        return $q->whereNotNull('read_at');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Helpers
+    |--------------------------------------------------------------------------
+    */
+
     public function isRead(): bool
     {
-        return !is_null($this->read_at);
+        return $this->read_at !== null;
     }
 }

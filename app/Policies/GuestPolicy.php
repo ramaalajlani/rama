@@ -5,107 +5,102 @@ namespace App\Policies;
 use App\Models\Guest;
 use App\Models\User;
 use Illuminate\Auth\Access\HandlesAuthorization;
+use Illuminate\Support\Facades\DB;
 
 class GuestPolicy
 {
     use HandlesAuthorization;
 
-    /**
-     * الفحص المبدئي (الأولوية القصوى)
-     * يتم استدعاؤها قبل أي دالة أخرى
-     */
-    public function before(User $user, $ability)
+    public function before(User $user, string $ability): ?bool
     {
-        // 1. إذا كان المستخدم معطلاً، ترفض أي عملية فوراً مهما كانت صلاحياته
-        if (!$this->isUserActive($user)) {
+        if (($user->status ?? '') !== 'active') {
             return false;
         }
 
-        // 2. مدير النظام (hq_admin) له كامل الصلاحيات "الجوكر"
         if ($user->hasRole('hq_admin')) {
             return true;
         }
+
+        return null;
     }
 
-    /**
-     * تحقق داخلي من حالة نشاط الموظف
-     */
-    private function isUserActive(User $user): bool
-    {
-        return !empty($user->status) && strtolower(trim($user->status)) === 'active';
-    }
-
-    /**
-     * رؤية قائمة النزلاء
-     */
     public function viewAny(User $user): bool
     {
         return $user->hasAnyRole(['branch_reception', 'hq_auditor', 'hq_security', 'hq_supervisor']);
     }
 
-    /**
-     * رؤية ملف نزيل محدد
-     */
     public function view(User $user, Guest $guest): bool
     {
-        // ميزة أمنية: موظف الاستقبال يرى فقط النزلاء الذين زاروا فرعه (عزل البيانات)
-        // إذا أردتِ تطبيق هذا القيد الصارم، يمكن تفعيل السطر التالي:
-        // if ($user->hasRole('branch_reception')) { return $guest->reservations()->where('branch_id', $user->branch_id)->exists(); }
+        // HQ roles يشوفوا أي نزيل
+        if ($user->hasAnyRole(['hq_auditor', 'hq_security', 'hq_supervisor'])) {
+            return true;
+        }
 
-        return $user->hasAnyRole(['branch_reception', 'hq_auditor', 'hq_security', 'hq_supervisor']);
+        // branch_reception: يشوف فقط نزلاء “زاروا” فرعه
+        if ($user->hasRole('branch_reception')) {
+            return $this->guestVisitedUserBranch($guest->id, (int)$user->branch_id);
+        }
+
+        return false;
     }
 
-    /**
-     * إنشاء نزيل جديد
-     */
     public function create(User $user): bool
     {
         return $user->hasAnyRole(['branch_reception', 'hq_supervisor']);
     }
 
-    /**
-     * التعديل على بيانات النزيل (منطق الحماية الثلاثي)
-     */
     public function update(User $user, Guest $guest): bool
     {
-        // 1. حماية المحظورين (Blacklist Protection)
-        // لا يُسمح للاستقبال بتعديل ملف شخص محظور؛ الصلاحية للأمن فقط
-        if ($guest->status === 'blacklisted') {
-            return $user->hasAnyRole(['hq_security']);
+        // HQ security فقط يعدّل blacklisted
+        if (($guest->status ?? '') === 'blacklisted') {
+            return $user->hasRole('hq_security');
         }
 
-        // 2. حماية النزلاء المرصودين (Flagged)
-        // إذا وُضع علم على النزيل، التعديل محصور بالمشرفين والأمن
-        if ($guest->is_flagged) {
+        // flagged: security أو supervisor
+        if ((bool) $guest->is_flagged) {
             return $user->hasAnyRole(['hq_security', 'hq_supervisor']);
         }
 
-        // 3. قفل البيانات المعتمدة (Audit Lock)
-        // بمجرد أن تصبح الحالة 'audited'، يُمنع الاستقبال من التغيير (لمنع التلاعب بالأسماء أو الهويات)
-        if ($guest->audit_status === 'audited' && $user->hasRole('branch_reception')) {
-            return false; 
+        // audited lock: branch_reception ممنوع
+        if (($guest->audit_status ?? '') === 'audited' && $user->hasRole('branch_reception')) {
+            return false;
         }
 
-        // 4. الصلاحية العامة للتعديل
-        return $user->hasAnyRole(['branch_reception', 'hq_supervisor']);
+        // supervisor دائماً
+        if ($user->hasRole('hq_supervisor')) {
+            return true;
+        }
+
+        // branch_reception: فقط إذا النزيل زار فرعه
+        if ($user->hasRole('branch_reception')) {
+            return $this->guestVisitedUserBranch($guest->id, (int)$user->branch_id);
+        }
+
+        return false;
     }
 
-    /**
-     * تدقيق النزيل (Audit Action)
-     * تحويل الحالة إلى Audited لقفل السجل
-     */
-    public function audit(User $user): bool
+    public function audit(User $user, Guest $guest): bool
     {
         return $user->hasAnyRole(['hq_auditor', 'hq_supervisor']);
     }
 
-    /**
-     * الحذف (سياسة "لا حذف نهائي" في النظام الأمني)
-     */
     public function delete(User $user, Guest $guest): bool
     {
-        // ممنوع الحذف تماماً لأي دور، حتى لو بالخطأ
-        // الاستثناء الوحيد هو hq_admin وتمت معالجته في دالة before
         return false;
+    }
+
+    /**
+     * Helper: هل النزيل له إقامة ضمن فرع المستخدم؟
+     */
+    private function guestVisitedUserBranch(int $guestId, int $branchId): bool
+    {
+        if ($branchId <= 0 || $guestId <= 0) return false;
+
+        return DB::table('reservation_guest as rg')
+            ->join('guest_reservations as gr', 'gr.id', '=', 'rg.reservation_id')
+            ->where('rg.guest_id', $guestId)
+            ->where('gr.branch_id', $branchId)
+            ->whereNull('gr.deleted_at')
+            ->exists();
     }
 }

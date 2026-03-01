@@ -1,35 +1,44 @@
 <?php
+// app/Policies/UserPolicy.php
 
 namespace App\Policies;
 
 use App\Models\User;
+use Illuminate\Auth\Access\HandlesAuthorization;
 
 class UserPolicy
 {
+    use HandlesAuthorization;
 
-    public function viewAny(User $user)
+    public function before(User $user, string $ability): ?bool
     {
-        return $user->hasRole(['hq_admin', 'hq_supervisor', 'branch_manager']);
+        if (($user->status ?? '') !== 'active') return false;
+        if ($user->hasRole('hq_admin')) return true;
+        return null;
     }
 
-    public function create(User $user)
+    public function viewAny(User $user): bool
     {
-        return $user->hasRole(['hq_admin', 'hq_supervisor']);
+        return $user->hasRole('hq_supervisor');
     }
 
-    public function update(User $user, User $model)
+    public function view(User $user, User $model): bool
     {
-
-        if ($user->hasRole('hq_admin')) {
-            return true;
-        }
-
-
-        return $user->hasRole('branch_manager') && $user->branch_id === $model->branch_id;
+        return $user->hasRole('hq_supervisor');
     }
 
-    public function delete(User $user, User $model)
+    public function create(User $user): bool
     {
-        return $user->hasRole('hq_admin');
+        return $user->hasRole('hq_supervisor');
+    }
+
+    public function update(User $user, User $model): bool
+    {
+        return $user->hasRole('hq_supervisor');
+    }
+
+    public function delete(User $user, User $model): bool
+    {
+        return false;
     }
 }
