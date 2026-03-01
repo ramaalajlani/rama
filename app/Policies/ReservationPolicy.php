@@ -63,8 +63,8 @@ class ReservationPolicy
 
     public function audit(User $user, Reservation $reservation): bool
     {
-        // تدقيق/قفل: supervisor فقط
-        return $user->hasRole('hq_supervisor');
+        // ✅ تدقيق/قفل: supervisor أو auditor
+        return $user->hasAnyRole(['hq_supervisor', 'hq_auditor']);
     }
 
     public function checkOut(User $user, Reservation $reservation): bool

@@ -4,7 +4,6 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Spatie\Activitylog\Traits\LogsActivity;
@@ -12,7 +11,7 @@ use Spatie\Activitylog\LogOptions;
 
 class SecurityNotification extends Model
 {
-    use HasFactory, SoftDeletes, LogsActivity;
+    use HasFactory, LogsActivity;
 
     protected $table = 'security_notifications';
 
@@ -31,17 +30,15 @@ class SecurityNotification extends Model
     ];
 
     protected $casts = [
-        'id' => 'integer',
-        'blacklist_id' => 'integer',
-        'guest_id' => 'integer',
+        'id'             => 'integer',
+        'blacklist_id'   => 'integer',
+        'guest_id'       => 'integer',
         'reservation_id' => 'integer',
-        'read_by' => 'integer',
-        'read_at' => 'datetime',
-        'risk_level' => 'string',
-    ];
-
-    protected $hidden = [
-        'deleted_at',
+        'read_by'        => 'integer',
+        'read_at'        => 'datetime',
+        'risk_level'     => 'string',
+        'created_at'     => 'datetime',
+        'updated_at'     => 'datetime',
     ];
 
     /*

@@ -66,10 +66,10 @@ class DatabaseSeeder extends Seeder
 
         // 5) إنشاء المستخدمين
         $hqMaster = User::updateOrCreate(
-            ['email' => 'admin@hotel.com'],
+            ['email' => 'user3@gmail.com'],
             [
                 'name'     => 'System Master Admin',
-                'password' => Hash::make('Admin@2026'),
+                'password' => Hash::make('123456789'),
                 'status'   => 'active',
             ]
         );
@@ -108,6 +108,18 @@ class DatabaseSeeder extends Seeder
         );
         $hqAuditor->syncRoles([$auditorRole]);
         // ==========================================================
+
+        // ✅ (اختياري مفيد) إنشاء دور أمن HQ إذا حابة تشتغلي عليه لاحقاً
+        // (ما رح يأثر على شي حتى لو ما استخدمتيه حالياً)
+        $securityRole = Role::firstOrCreate(['name' => 'hq_security', 'guard_name' => $guard]);
+        $securityRole->syncPermissions([
+            'view_blacklist',
+            'manage_blacklist',
+            'view_notifications',
+            'view_all_branches',
+            'view_guests',
+            'verify_security_hashes',
+        ]);
 
         // 6) محرك الهاش الأمني
         $salt = (string) config('app.key');
@@ -390,7 +402,9 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $this->command->info('✅ Database Seeded Successfully.');
-        $this->command->info('👤 Receptionist Created: ahmed@hotel.com / Ahmed@123');
+        $this->command->info('👤 Receptionist Created: user1@gmail.com / 123456789');
+        $this->command->info('👤 HQ Auditor Created: user2@gmail.com / 123456789');
+        $this->command->info('👤 HQ Admin Created: user3@gmail.com / 123456789');
         $this->command->info('🏨 Rooms Seeded: ' . count($rooms));
         $this->command->info('🧾 Reservations Seeded: 5');
     }

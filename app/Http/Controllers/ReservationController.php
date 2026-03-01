@@ -672,50 +672,50 @@ class ReservationController extends Controller
      * ✅ LITE: GET /api/reservations/due-checkouts-today-lite?date=YYYY-MM-DD&limit=200
      * ⚡ أسرع: لازم يغادروا اليوم (check_out ضمن اليوم + actual_check_out null)
      */
- public function dueCheckoutsTodayLite(Request $request): JsonResponse
-{
-    try {
-        $user = Auth::user();
-        $this->authorize('viewAny', Reservation::class);
+    public function dueCheckoutsTodayLite(Request $request): JsonResponse
+    {
+        try {
+            $user = Auth::user();
+            $this->authorize('viewAny', Reservation::class);
 
-        $date = (string)$request->get('date', now()->toDateString());
-        $limit = max(1, min(300, (int)$request->get('limit', 200)));
+            $date = (string)$request->get('date', now()->toDateString());
+            $limit = max(1, min(300, (int)$request->get('limit', 200)));
 
-        $q = DB::table('guest_reservations as r')
-            ->leftJoin('rooms as rm', 'rm.id', '=', 'r.room_id')
-            ->leftJoin('reservation_guest as rg', function ($join) {
-                $join->on('rg.reservation_id', '=', 'r.id')
-                     ->where('rg.participant_type', '=', 'primary');
-            })
-            ->leftJoin('guests as g', 'g.id', '=', 'rg.guest_id')
-            ->select([
-                'r.id','r.branch_id','r.room_id',
-                'rm.room_number','rm.floor_number',
-                'r.check_in','r.check_out','r.actual_check_out',
-                'r.status','r.audit_status','r.is_locked',
-                'r.vehicle_plate','r.created_at',
-                DB::raw("TRIM(CONCAT_WS(' ', g.first_name, g.father_name, g.last_name)) as primary_guest_name"),
-            ])
-            ->whereNull('r.deleted_at')
-            ->whereNotNull('r.check_out')
-            ->whereDate('r.check_out', $date)
-            ->whereNull('r.actual_check_out')
-            ->whereIn('r.status', ['confirmed','pending'])
-            ->orderBy('r.check_out', 'asc')
-            ->limit($limit);
+            $q = DB::table('guest_reservations as r')
+                ->leftJoin('rooms as rm', 'rm.id', '=', 'r.room_id')
+                ->leftJoin('reservation_guest as rg', function ($join) {
+                    $join->on('rg.reservation_id', '=', 'r.id')
+                         ->where('rg.participant_type', '=', 'primary');
+                })
+                ->leftJoin('guests as g', 'g.id', '=', 'rg.guest_id')
+                ->select([
+                    'r.id','r.branch_id','r.room_id',
+                    'rm.room_number','rm.floor_number',
+                    'r.check_in','r.check_out','r.actual_check_out',
+                    'r.status','r.audit_status','r.is_locked',
+                    'r.vehicle_plate','r.created_at',
+                    DB::raw("TRIM(CONCAT_WS(' ', g.first_name, g.father_name, g.last_name)) as primary_guest_name"),
+                ])
+                ->whereNull('r.deleted_at')
+                ->whereNotNull('r.check_out')
+                ->whereDate('r.check_out', $date)
+                ->whereNull('r.actual_check_out')
+                ->whereIn('r.status', ['confirmed','pending'])
+                ->orderBy('r.check_out', 'asc')
+                ->limit($limit);
 
-        if (!$user->hasAnyRole(['hq_admin','hq_security','hq_auditor','hq_supervisor'])) {
-            $q->where('r.branch_id', (int)$user->branch_id);
-        } elseif ($request->filled('branch_id')) {
-            $q->where('r.branch_id', (int)$request->branch_id);
+            if (!$user->hasAnyRole(['hq_admin','hq_security','hq_auditor','hq_supervisor'])) {
+                $q->where('r.branch_id', (int)$user->branch_id);
+            } elseif ($request->filled('branch_id')) {
+                $q->where('r.branch_id', (int)$request->branch_id);
+            }
+
+            return response()->json(['status' => 'success', 'data' => $q->get()]);
+        } catch (Exception $e) {
+            Log::error("Due Checkouts Today Lite Error: ".$e->getMessage(), ['trace'=>$e->getTraceAsString()]);
+            return response()->json(['status'=>'error','message'=>'تعذر جلب مغادرات اليوم المطلوبة (Lite)'], 500);
         }
-
-        return response()->json(['status' => 'success', 'data' => $q->get()]);
-    } catch (Exception $e) {
-        Log::error("Due Checkouts Today Lite Error: ".$e->getMessage(), ['trace'=>$e->getTraceAsString()]);
-        return response()->json(['status'=>'error','message'=>'تعذر جلب مغادرات اليوم المطلوبة (Lite)'], 500);
     }
-}
 
     private function clearReservationCache(): void
     {

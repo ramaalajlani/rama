@@ -1,111 +1,92 @@
 <?php
 
-namespace App\Services;
+namespace App\Http\Requests;
 
-use App\Models\Guest;
-use App\Models\SecurityBlacklist;
-use App\Models\SecurityNotification;
-use Illuminate\Support\Facades\{Log, DB};
-use Exception;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
-class GuestService
+class StoreGuestRequest extends FormRequest
 {
-    /**
-     * معالجة النزيل: تسجيله أو تحديث بياناته مع الفحص الأمني المطور
-     */
-    public function storeOrUpdateGuest(array $data)
+    public function authorize(): bool
     {
-        return DB::transaction(function () use ($data) {
-            // 1. تنظيف البيانات وتوليد الهاشات الأمنية
-            $nationalId = trim($data['national_id']);
-            $idHash = hash('sha256', $nationalId);
-            
-            // توليد هاش الاسم الكامل (Triple Check) مع إزالة المسافات وتوحيد حالة الأحرف
-            $firstName = trim($data['first_name']);
-            $fatherName = trim($data['father_name'] ?? '');
-            $lastName = trim($data['last_name']);
-            
-            $fullName = "{$firstName} {$fatherName} {$lastName}";
-            // الهاش الأمني يعتمد على الاسم ملتصقاً لمنع التلاعب بالمسافات
-            $cleanName = mb_strtolower(str_replace(' ', '', $fullName), 'UTF-8');
-            $fullSecurityHash = hash('sha256', $cleanName);
+        // إذا عندك Policy وبتعمل authorize بالكنترولر، خليه true
+        // والكنترولر هو اللي يقرر.
+        return true;
+    }
 
-            // 2. الفحص الأمني المسبق (عبر الهوية أو هاش الاسم)
-            $blacklistMatch = SecurityBlacklist::where('national_id_hash', $idHash)
-                ->orWhere('full_security_hash', $fullSecurityHash)
-                ->first();
+    public function rules(): array
+    {
+        return [
+            // الهوية (مطلوبة دائماً)
+            'national_id' => ['required', 'string', 'min:3', 'max:64'],
 
-            // 3. تحديد الحالة الأمنية
-            if ($blacklistMatch) {
-                $data['status'] = 'blacklisted';
-                $data['is_flagged'] = true;
-                
-                // تسجيل التنبيه الأمني فوراً
-                $this->createSecurityAlert($fullName, $nationalId, $blacklistMatch);
-            }
+            // الأسماء (مطلوبة عند الإنشاء - لكن أنت ممكن تمررها دائماً)
+            'first_name'  => ['required', 'string', 'min:2', 'max:100'],
+            'father_name' => ['nullable', 'string', 'max:100'],
+            'last_name'   => ['required', 'string', 'min:2', 'max:100'],
+            'mother_name' => ['nullable', 'string', 'max:100'],
 
-            // 4. الحفظ أو التحديث
-            $guest = Guest::updateOrCreate(
-                ['national_id' => $nationalId],
-                [
-                    'first_name'         => $firstName,
-                    'father_name'        => $fatherName,
-                    'last_name'          => $lastName,
-                    'mother_name'        => $data['mother_name'] ?? null,
-                    'id_type'            => $data['id_type'],
-                    'nationality'        => $data['nationality'],
-                    'phone'              => $data['phone'],
-                    'email'              => $data['email'] ?? null,
-                    'address'            => $data['address'] ?? null,
-                    'status'             => $data['status'] ?? 'active',
-                    'is_flagged'         => $data['is_flagged'] ?? false,
-                    'national_id_hash'   => $idHash,
-                    'full_security_hash' => $fullSecurityHash,
-                    'audit_status'       => 'new' 
-                ]
-            );
+            // معلومات أساسية
+            'id_type'     => ['required', 'string', 'max:50'],       // مثال: بطاقة شخصية / جواز
+            'nationality' => ['required', 'string', 'max:80'],
+            'phone'       => ['required', 'string', 'max:30'],
 
-            return $guest;
-        });
+            // اختياري
+            'email'       => ['nullable', 'email', 'max:150'],
+            'address'     => ['nullable', 'string', 'max:255'],
+            'car_plate'   => ['nullable', 'string', 'max:30'],
+
+            // هذه الحقول إذا بدك تسمح فيها فقط من HQ خليهـا ممنوعة هنا
+            // أو خليها nullable بس انتبه للسيكيوريتي
+            'status'      => ['nullable', Rule::in(['active', 'blacklisted'])],
+            'is_flagged'  => ['nullable', 'boolean'],
+            'audit_status'=> ['nullable', Rule::in(['new', 'audited'])],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'national_id.required' => 'رقم الهوية مطلوب.',
+            'first_name.required'  => 'الاسم الأول مطلوب.',
+            'last_name.required'   => 'الكنية مطلوبة.',
+            'id_type.required'     => 'نوع الهوية مطلوب.',
+            'nationality.required' => 'الجنسية مطلوبة.',
+            'phone.required'       => 'رقم الهاتف مطلوب.',
+            'email.email'          => 'صيغة البريد الإلكتروني غير صحيحة.',
+        ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        // تنظيف بسيط قبل التحقق (مثل اللي تعملو بالسيرفس)
+        $nationalId = (string)($this->national_id ?? '');
+        $nationalId = preg_replace('/\s+/', '', trim($nationalId)) ?? '';
+
+        $this->merge([
+            'national_id' => $nationalId,
+            'first_name'  => isset($this->first_name) ? trim((string)$this->first_name) : null,
+            'father_name' => isset($this->father_name) ? trim((string)$this->father_name) : null,
+            'last_name'   => isset($this->last_name) ? trim((string)$this->last_name) : null,
+            'mother_name' => isset($this->mother_name) ? trim((string)$this->mother_name) : null,
+            'phone'       => isset($this->phone) ? trim((string)$this->phone) : null,
+            'email'       => isset($this->email) && $this->email !== null ? mb_strtolower(trim((string)$this->email), 'UTF-8') : null,
+            'address'     => isset($this->address) ? trim((string)$this->address) : null,
+            'car_plate'   => isset($this->car_plate) ? trim((string)$this->car_plate) : null,
+        ]);
     }
 
     /**
-     * البحث الذكي: تحسين الأداء باستخدام Select محدد
+     * OPTIONAL: لو بدك تمنع تمرير status/is_flagged/audit_status من الفرع نهائياً
+     * (أنصح فيه أمنياً)
      */
-    public function searchGuests(string $queryText)
+    public function validated($key = null, $default = null)
     {
-        $queryText = trim($queryText);
-        return Guest::select('id', 'first_name', 'last_name', 'national_id', 'status', 'is_flagged', 'audit_status')
-            ->where('national_id', 'like', "{$queryText}%") // البحث من البداية أسرع في الفهرسة
-            ->orWhere('first_name', 'like', "%{$queryText}%")
-            ->orWhere('last_name', 'like', "%{$queryText}%")
-            ->limit(10)
-            ->get();
-    }
+        $data = parent::validated($key, $default);
 
-    /**
-     * إنشاء تنبيه أمني وإرساله للـ HQ
-     */
-    protected function createSecurityAlert(string $fullName, string $nationalId, SecurityBlacklist $blacklistMatch)
-    {
-        try {
-            $user = auth()->user();
+        // 🔒 إذا بدك تقفل هالحقول من الـ API العادي:
+        unset($data['status'], $data['is_flagged'], $data['audit_status']);
 
-            SecurityNotification::create([
-                'blacklist_id' => $blacklistMatch->id,
-                'guest_name'   => $fullName,
-                'national_id'  => $nationalId,
-                'branch_id'    => $user->branch_id ?? null,
-                'risk_level'   => $blacklistMatch->risk_level ?? 'CRITICAL',
-                'details'      => "🛑 محاولة رصد: تم العثور على مطابقة للقائمة السوداء لشخص يحاول التسكين باسم [{$fullName}] ورقم هوية [{$nationalId}]",
-            ]);
-
-            Log::warning("SECURITY_HOT: Blacklisted guest match detected", [
-                'national_id' => $nationalId,
-                'match_type'  => $blacklistMatch->full_security_hash === hash('sha256', mb_strtolower(str_replace(' ', '', $fullName))) ? 'NAME_MATCH' : 'ID_MATCH'
-            ]);
-        } catch (Exception $e) {
-            Log::error("Failed to create security notification: " . $e->getMessage());
-        }
+        return $data;
     }
 }

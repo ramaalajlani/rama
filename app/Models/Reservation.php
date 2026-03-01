@@ -13,6 +13,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Spatie\Activitylog\Traits\LogsActivity;
 use Spatie\Activitylog\LogOptions;
 
+// ✅ Missing imports (ضروري)
+use App\Models\{Guest, Room, Branch, User, ReservationGuest, GuestDocument};
+
 class Reservation extends Model
 {
     use SoftDeletes, HasFactory, LogsActivity;

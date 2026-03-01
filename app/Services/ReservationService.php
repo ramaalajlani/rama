@@ -132,8 +132,8 @@ class ReservationService
             // 1) ربط النزلاء + رفع الوثائق
             $this->attachOccupantsAndDocs($reservation, $occupants, $request);
 
-            // 2) فحص blacklist (صامت) + Lock إن لزم
-            $this->silentBlacklistCheckAndLockIfNeeded($reservation);
+            // 2) فحص blacklist (صامت) + (Flag + Notification فقط) بدون Lock
+            $this->silentBlacklistCheckAndFlagIfNeeded($reservation);
 
             // تحميل مخرجات خفيفة
             $reservation->load([
@@ -237,7 +237,13 @@ class ReservationService
         }
     }
 
-    private function silentBlacklistCheckAndLockIfNeeded(Reservation $reservation): void
+    /**
+     * ✅ فحص blacklist بشكل صامت:
+     * - ينشئ Notification فقط (داخل SecurityService)
+     * - يعلّم الإقامة flagged لحتى تظهر للمدقق بالأحمر
+     * - ❌ بدون Lock نهائياً
+     */
+    private function silentBlacklistCheckAndFlagIfNeeded(Reservation $reservation): void
     {
         Gate::authorize('check', \App\Models\SecurityBlacklist::class);
 
@@ -247,9 +253,10 @@ class ReservationService
             $match = $this->securityService->checkGuestAgainstBlacklist($guest, $reservation);
 
             if (!empty($match['found'])) {
+                // ✅ لا تقفل — فقط علّمها flagged لتظهر للمدقق
                 $reservation->update([
-                    'audit_status' => 'audited', // إخفاء سبب lock عن الفرع
-                    'is_locked'    => true,
+                    'audit_status' => 'flagged',
+                    'is_locked'    => false,
                     'locked_by'    => null,
                 ]);
                 return;

@@ -77,8 +77,7 @@ return new class extends Migration
             // branch filter + whereBetween(check_out) + whereNull(actual_check_out)
             $table->index(['branch_id', 'check_out', 'actual_check_out'], 'idx_due_checkout_today');
 
-            // ✅ NEW: أسرع لاستعلام today-checkouts (actual_check_out today)
-            $table->index(['branch_id', 'actual_check_out'], 'idx_today_actual_checkout');
+     
         });
     }
 

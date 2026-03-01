@@ -9,7 +9,8 @@ use App\Http\Controllers\{
     UserController,
     BranchController,
     GuestController,
-    SecurityBlacklistController
+    SecurityBlacklistController,
+    AuditLogController
 };
 
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
@@ -20,8 +21,8 @@ if (app()->environment('local')) {
     Route::get('/debug-auth', function (Request $r) {
         return response()->json([
             'has_cookie_access_token' => $r->hasCookie('access_token'),
-            'cookie_prefix' => $r->cookie('access_token') ? substr((string)$r->cookie('access_token'), 0, 25) : null,
-            'authorization_header' => $r->header('Authorization'),
+            'cookie_prefix'           => $r->cookie('access_token') ? substr((string)$r->cookie('access_token'), 0, 25) : null,
+            'authorization_header'    => $r->header('Authorization'),
         ]);
     });
 
@@ -40,6 +41,9 @@ if (app()->environment('local')) {
 
 Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
 
+    // =========================
+    // Auth
+    // =========================
     Route::get('/auth/me', [AuthController::class, 'me']);
 
     Route::get('/user-status', function (Request $request) {
@@ -59,6 +63,9 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
         ]);
     });
 
+    // =========================
+    // Security
+    // =========================
     Route::prefix('security')->group(function () {
 
         Route::middleware('role:hq_admin|hq_security|hq_auditor|hq_supervisor')->group(function () {
@@ -77,6 +84,9 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
         });
     });
 
+    // =========================
+    // Reservations (extra endpoints)
+    // =========================
     Route::prefix('reservations')->group(function () {
 
         // ===== Extra endpoints (لازم قبل resource) =====
@@ -98,7 +108,7 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
             ->name('doc.view');
 
         Route::post('/{reservation}/audit', [ReservationController::class, 'audit'])
-            ->middleware(['role:hq_admin|hq_supervisor|hq_security|hq_auditor', 'throttle:30,1'])
+            ->middleware(['role:hq_admin|hq_supervisor|hq_auditor', 'throttle:30,1'])
             ->whereNumber('reservation');
 
         Route::post('/{reservation}/checkout', [ReservationController::class, 'checkOut'])
@@ -118,6 +128,9 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::apiResource('reservations', ReservationController::class)
         ->where(['reservation' => '[0-9]+']);
 
+    // =========================
+    // Guests
+    // =========================
     Route::prefix('guests')->group(function () {
 
         Route::post('/search', [GuestController::class, 'search'])
@@ -129,26 +142,43 @@ Route::middleware(['auth:sanctum', 'throttle:api'])->group(function () {
 
     Route::apiResource('guests', GuestController::class);
 
+    // =========================
+    // Rooms
+    // =========================
     Route::prefix('rooms')->group(function () {
 
         Route::get('/', [RoomController::class, 'index']);
 
         Route::patch('/{room}/status', [RoomController::class, 'updateStatus'])
-            ->middleware(['role:hq_admin|hq_supervisor|branch_reception', 'throttle:60,1']);
+            ->middleware(['role:hq_admin|hq_supervisor|branch_reception', 'throttle:60,1'])
+            ->whereNumber('room');
     });
 
+    // =========================
+    // Audit Logs (كل النظام)
+    // =========================
+    Route::get('/audit-logs', [AuditLogController::class, 'index'])
+        ->middleware(['role:hq_admin|hq_auditor|hq_supervisor|hq_security', 'throttle:30,1']);
+
+    // =========================
+    // HQ Admin Only
+    // =========================
     Route::middleware('role:hq_admin')->group(function () {
 
         Route::apiResource('branches', BranchController::class);
         Route::apiResource('users', UserController::class);
 
-        Route::get('/audit-logs', [UserController::class, 'systemLogs'])
+        // ✅ خليته باسم واضح ومميز حتى ما يتعارض مع /audit-logs
+        Route::get('/system-logs', [UserController::class, 'systemLogs'])
             ->middleware('throttle:30,1');
 
         Route::get('/reports/global-daily', [ReservationController::class, 'globalDailyStats'])
             ->middleware('throttle:30,1');
     });
 
+    // =========================
+    // Logout
+    // =========================
     Route::post('/logout', [AuthController::class, 'logout'])
         ->middleware('throttle:30,1');
 });

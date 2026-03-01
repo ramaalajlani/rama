@@ -137,6 +137,25 @@ class SecurityBlacklistController extends Controller
         }
     }
 
+    public function unreadCount(Request $request): JsonResponse
+    {
+        $this->authorize('audit', SecurityBlacklist::class);
+
+        try {
+            $count = SecurityNotification::query()
+                ->whereNull('read_at')
+                ->count();
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => ['unread_count' => (int)$count],
+            ]);
+        } catch (Exception $e) {
+            Log::warning("UnreadCount Error: " . $e->getMessage());
+            return response()->json(['status' => 'error', 'message' => 'تعذر جلب عدد غير المقروء'], 500);
+        }
+    }
+
     public function markAsRead(int $id): JsonResponse
     {
         $this->authorize('audit', SecurityBlacklist::class);
